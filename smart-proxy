@@ -1,0 +1,1217 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC1071 # ShellCheck only supports sh/bash/dash/ksh scripts. Sorry!
+
+#
+# Многие вещи можно было бы упростить или использовать готовые решения,
+# но целью было максимальная самодостаточность скрипта и отсутствие внешних зависимостей,
+# из-за чего некоторые части скрипта и логика получились избыточными и сложными.
+#
+
+#
+# Declare functions
+#
+
+is_enabled(){
+    grep -q -w -i -E "(1|yes|true)" <<< "$*"
+}
+
+is_linux(){
+    uname | grep -ioq "linux"
+}
+
+is_systemd(){
+    is_linux || return 1
+    grep -q systemd < /proc/1/comm 
+}
+
+is_bash(){
+    [[ "${BASH_VERSION}" ]]
+}
+
+is_zsh(){
+    [[ "${ZSH_VERSION}" ]]
+}
+
+tcp_port_info(){
+    case "$1" in
+    -q | --quiet)
+        lsof -i :"$2" -P -n -s TCP:LISTEN > /dev/null 2>&1
+    ;;
+    -p | --pids)
+        lsof -i :"$2" -P -n -s TCP:LISTEN | awk 'NR > 1 {print $2}'
+    ;;
+    *)
+        lsof -i :"$1" -P -n -s TCP:LISTEN | awk 'NR > 1'
+    ;;
+    esac
+}
+
+create(){
+    case $1 in
+    -f | --file)
+        [[ -f "$2" ]] || touch "$2" || fail "Не удалось создать файл $2"
+    ;;
+    -d | --directory)
+        [[ -d "$2" ]] || mkdir -p "$2" || fail "Не удалось создать директорию $2"
+    ;;
+    esac
+}
+
+current_time(){
+    LANG=ru_RU.UTF-8 date +'%Y-%m-%d %H:%M:%S'
+}
+
+log(){
+    local TIMESTAMP LOG_LEVEL LOG_LEVEL_REGEX CALLING_FUNCTION_INFO LOG
+
+    CALLING_FUNCTION_INFO="[ ${FUNCNAME[2]:-${funcstack[3]}}:${FUNCNAME[1]-${funcstack[2]}} ]"
+    TIMESTAMP="[ $(current_time) ]"
+    LOG_LEVEL_REGEX="(warn|error|info)"
+
+    if grep -E -q "${LOG_LEVEL_REGEX}" <<<"$1"; then
+        LOG_LEVEL="[ $(tr '[:lower:]' '[:upper:]' <<<"$1") ]"
+        shift
+    fi
+
+    LOG="${LOG_LEVEL} ${CALLING_FUNCTION_INFO} $*"
+
+    if ! [[ "${SYSTEMD_LOGS}" ]]; then
+        LOG="${TIMESTAMP} ${LOG}"
+    fi
+
+    echo "${TIMESTAMP} ${LOG_LEVEL} ${CALLING_FUNCTION_INFO} $*"
+}
+
+set_if_undefined(){
+    local VAR DEFAULT TMP
+
+    VAR="$1"
+    DEFAULT="$2"
+    TMP=$(eval "echo -n \$${VAR}")
+
+    [[ -z "${TMP}" ]] && eval "${VAR}=${DEFAULT}" &&
+    log warn "Значение для переменной ${VAR} не задано. Используется значение по умолчанию: ${DEFAULT}"
+}
+
+fail(){
+    log error "Ошибка: $*"
+    exit 1
+}
+
+#
+# SSH PROXY
+#
+
+ssh_proxy(){
+    local PID PIDS
+
+    SSH_LOCKFILE="${LOCKFILES}/${FUNCNAME[0]:-${funcstack[1]}}.locked"
+
+    is_running(){
+        if tcp_port_info "${PROXY_PORT}" | grep -q "${PROXY_SERVER}"; then
+            PIDS=$(tcp_port_info --pids "${PROXY_PORT}")
+        fi
+        [[ "${PIDS}" ]]
+    }
+
+    start_ssh_proxy(){
+        if is_enabled "${SSH_CONFIG}"; then
+            ssh -D "${PROXY_SERVER}" -N -C \
+                -o "ServerAliveInterval=1" \
+                -o "ServerAliveCountMax=1" \
+                -o "ForwardAgent=no" \
+                -F "${SSH_CONFIG_FILE}" \
+                "${SSH_HOST}"
+        else
+            ssh -D "${PROXY_SERVER}" -N -C \
+                -o "ServerAliveInterval=1" \
+                -o "ServerAliveCountMax=1" \
+                -o "ForwardAgent=no" \
+                -i "${SSH_IDENTITY}" \
+                "${SSH_USER}@${SSH_HOST}" \
+                -p "${SSH_PORT}"
+        fi
+    }
+
+    case $1 in
+    start)
+        if is_running; then
+            log info "SSH Proxy уже запущен на ${PROXY_SERVER}"
+            return 0
+        elif tcp_port_info --quiet "${PROXY_PORT}"; then
+            log error "Не удалось запустить SSH Proxy. Порт ${PROXY_PORT} уже используется $(tcp_port_info "${PROXY_PORT}")"
+        fi
+
+        create -f "${SSH_LOCKFILE}"
+
+        log info "Запускаю SSH Proxy на ${PROXY_SERVER}"
+        if is_enabled "${PROXY_AUTORESTART}"; then
+            (while [[ -f "${SSH_LOCKFILE}" ]]; do
+                start_ssh_proxy
+            done &) > /dev/null 2>&1
+        else
+           (start_ssh_proxy &) > /dev/null 2>&1
+        fi
+        sleep 5
+    ;;
+    stop)
+        rm -rf "${SSH_LOCKFILE}" > /dev/null 2>&1
+        if is_running; then
+            log info "Завершение работы SSH Proxy ${PROXY_SERVER}"
+            for PID in ${PIDS}; do
+                (ps -p "${PID}" && kill -9 "${PID}") &> /dev/null
+            done
+        else
+            log info "Нечего останавливать. SSH Proxy не запущен"
+        fi
+    ;;
+    status)
+        if is_running; then
+            log info "SSH Proxy запущен на ${PROXY_SERVER}"
+        else
+            log info "SSH Proxy не запушен"
+        fi
+    ;;
+    is-running)
+        is_running
+    ;;
+    esac
+}
+
+check_ssh_proxy(){
+    local CURRENT_IP PROXY_IP
+
+    PROXY_IP=$(
+        curl -sL --max-time 3 --socks5 \
+            "${PROXY_SERVER}" \
+            "${IP_CHECKER_HOST}"
+    )
+
+    CURRENT_IP=$(
+        curl -sL --max-time 3 \
+            "${IP_CHECKER_HOST}"
+    )
+
+    if [[ -z "${PROXY_IP}" ]]; then
+        fail "Не удалось подключиться к ${IP_CHECKER_HOST} через прокси ${PROXY_SERVER}"
+    elif [[ "${CURRENT_IP}" ]] && [[ "${PROXY_IP}" ]]; then
+        log info "Ваш IP-адрес от провайдера: ${CURRENT_IP}, IP-адрес через прокси: ${PROXY_IP}"
+    fi
+}
+
+#
+# HTTP сервер
+#
+
+http_server(){
+    local PID PIDS
+
+    HTTP_LOCKFILE="${LOCKFILES}/${FUNCNAME[0]:-${funcstack[1]}}.locked"
+
+    is_running(){
+        if tcp_port_info "${HTTP_SERVER_PORT}" | grep -q "${HTTP_SERVER_PORT}"; then
+            PIDS=$(tcp_port_info --pids "${HTTP_SERVER_PORT}")
+        fi
+        [[ "${PIDS}" ]]
+    }
+
+    start_http_server(){
+        # shellcheck disable=SC2016 # Expressions don't expand in single quotes, use double quotes for that.
+        # shellcheck disable=SC1078 # Did you forget to close this double-quoted string?
+        nc -vl "${HTTP_SERVER_IP}" "${HTTP_SERVER_PORT}" -c '(
+            read -r first_LINE
+            # Извлечение команды из запроса
+            read -r -d '' request_parameters
+            IFS=" " read -r method path version <<< "$first_LINE"
+            sanitized_filename=$(echo "$path" | sed "s/[^A-Za-z0-9._-]//g")
+            response_header="HTTP/1.0 200 OK\r\n"
+            content_type="Content-Type: "
+            content_length="Content-Length: "
+
+            # Если файл не указан, устанавливаем info как значение по умолчанию
+            if [[ -z $sanitized_filename ]]; then
+                sanitized_filename="info"
+            fi
+
+            if [[ -f $sanitized_filename ]]; then
+                # Если файл существует, отправляем его содержимое
+                file_type=$(file -ib "$sanitized_filename")
+                file_size=$(stat -c%s "$sanitized_filename")
+                echo -e "$response_header$content_type$file_type\r\n$content_length$file_size\r\n"
+                cat "$sanitized_filename"
+            else
+                # Если файл не найден, отправляем 404
+                echo -e "HTTP/1.0 404 Not Found\r\n\r\n
+                    <!doctype html>
+                    <html>
+                    <head>
+                        <meta charset="UTF-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <title>404 Not Found</title>
+                        <style>
+                            body { display: flex; align-items: center; justify-content: center; height: 100vh; font-family: Arial, sans-serif; }
+                            h1 { font-size: 48px; }
+                        </style>
+                    </head>
+                    <body>
+                        <h1>404 - Page Not Found</h1>
+                    </body>
+                    </html>
+                "
+            fi
+        )'
+    }
+
+    case $1 in
+    start)
+        if is_running; then
+            log info "HTTP сервер ${HTTP_SERVER} уже запущен"
+            return 0
+        elif [[ ! -d "${WEBDIR}" ]]; then
+            fail "Директория ${WEBDIR} не найдена"
+        fi
+
+        cd "${WEBDIR}" || fail "Не удалось перейти в директорию ${WEBDIR}. Проверьте права и доступы"
+
+        if tcp_port_info -q "${HTTP_SERVER_PORT}"; then
+            fail "Не удалось запустить HTTP сервер. Порт ${HTTP_SERVER_PORT} уже используется "
+        fi
+
+        create -f "${HTTP_LOCKFILE}"
+
+        log info "Запускаю HTTP сервер ${HTTP_SERVER} в рабочей директории ${WEBDIR}"
+        if is_enabled "${HTTP_AUTORESTART}"; then
+            (while [[ -f "${HTTP_LOCKFILE}" ]]; do
+                start_http_server
+            done &) > /dev/null 2>&1
+        else
+           (start_http_server &) > /dev/null 2>&1
+        fi
+        sleep 3
+    ;;
+    stop)
+        rm -rf "${HTTP_LOCKFILE}" > /dev/null 2>&1
+        if is_running; then
+            log info "Завершение работы HTTP сервера ${HTTP_SERVER}"
+            for PID in ${PIDS}; do
+                (ps -p "${PID}" && kill -9 "${PID}") &> /dev/null
+            done
+        else
+            log info "Нечего останавливать. HTTP сервер не запущен"
+        fi
+    ;;
+    status)
+        if is_running; then
+            log info "HTTP сервер запущен на ${HTTP_SERVER}"
+        else 
+            log info "HTTP сервер не запушен"
+        fi
+    ;;
+    is-running)
+        is_running
+    ;;
+    esac
+}
+
+check_http_server(){
+    local RESULT
+
+    RESULT=$(
+        curl -sL --max-time 3 \
+            -w "%{http_code}" \
+            -o /dev/null \
+            "http://${HTTP_SERVER}" 
+    )
+
+    if [[ "${RESULT}" = "000" ]]; then
+        fail "При проверке HTTP сервера ${HTTP_SERVER} возникла ошибка. Проверьте работу сервера"
+    else
+        log info "HTTP сервер ${HTTP_SERVER} готов принимать запросы"
+    fi
+}
+
+config(){
+    create_config_template(){
+    if [[ -f "${CONFIG}" ]]; then
+        log info "Файл конфигурации ${CONFIG} уже существует"
+        return 0
+    fi
+    log info "Создание шаблона конфигурации ${CONFIG}"
+    cat <<EOF > "${CONFIG}"
+# Локальный IP адрес для SSH прокси (по умолчанию: 127.0.0.1)
+PROXY_IP=127.0.0.1
+
+# Локальный PORT для SSH прокси (по умолчанию: 61942)
+PROXY_PORT=61942
+
+# Переменная, определяющая будет
+# ли перезапущен Proxy при падении (по умолчанию: true)
+PROXY_AUTORESTART=true
+
+# Переменная, определяющая будет ли автоматически генерироваться PAC
+# и другие файлы при измении файла домена или IP адресов (по умолчанию: false)
+FILES_GEN_AUTORESTART=false
+
+# Интервал проверки файла домена или IP адресов
+# на наличие изменений в секундах (по умолчанию: 10)
+# учитываеется при FILES_GEN_AUTORESTART=true
+FILES_GEN_INTERVAL=10
+
+# Внешний хост для проверки работы прокси
+# Ресурс должен возвращать IP адрес при обращении
+# Пример таких сервисов: 2ip.ru eth0.me ifconfig.me
+IP_CHECKER_HOST=ifconfig.me
+
+# IP адрес HTTP сервера (по умолчанию: 127.0.0.1)
+HTTP_SERVER_IP=127.0.0.1
+
+# Порт для HTTP сервера (по умолчанию: 8080)
+HTTP_SERVER_PORT=8080
+
+# Переменная, определяющая будет
+# ли перезапущен HTTP сервер при падении (по умолчанию: true)
+HTTP_AUTORESTART=true
+
+# Определяет стоит ли использовать SSH config (по умолчанию: true)
+SSH_CONFIG=true
+
+# Путь к конфигу SSH (по умолчанию: ~/.ssh/config)
+# Не используется если SSH_CONFIG=false
+SSH_CONFIG_FILE="${HOME}/.ssh/config"
+
+# Удаленный хост для организации прокси (по умолчанию: localhost)
+# Указывается IP адрес или домен
+#
+# При использовании конфига (SSH_CONFIG=true) 
+# указывается хост из конфига, иначе - хост для прямого подключения
+SSH_HOST=${BASENAME}
+
+# Порт SSH сервера удаленного хоста (по умолчанию: 22)
+# Используются только если
+# значение переменной SSH_CONFIG=false
+SSH_PORT=22
+
+# Имя пользователя для подключения по SSH к удаленному хосту (по умолчанию: root)
+# Используются только если
+# значение переменной SSH_CONFIG=false
+SSH_USER=root
+
+# Файл SSH ключа для подключения к удаленному хосту (по умолчанию: ~/.ssh/id_rsa)
+# Используются только если
+# значение переменной SSH_CONFIG=false
+SSH_IDENTITY=${HOME}/.ssh/id_rsa
+EOF
+        log info "Шаблон конфигурации ${CONFIG} успешно создан"
+    }
+
+    ### DIRS
+    TMPDIR="${WORKDIR}/tmp"
+    WEBDIR="${TMPDIR}/http_server"
+    LOCKFILES="${TMPDIR}/lock"
+
+    ### FILES
+    LOG_FILE="${WORKDIR}/log.txt"
+    CONFIG="${WORKDIR}/config"
+    DOMAINS_FILE="${WORKDIR}/domains_list"
+    IP_ADDR_FILE="${WORKDIR}/ips_list"
+    INFO_FILE="${WEBDIR}/info"
+    FOXY_PROXY_CONFIG="${WEBDIR}/foxy_proxy.json"
+    PAC_FILE="${WEBDIR}/proxy.pac"
+
+    case $1 in
+    init)
+        log info "Первичная инициализация в ${WORKDIR}"
+
+        # Create dirs
+        create -d "${WORKDIR}"
+        create -d "${LOCKFILES}"
+        create -d "${TMPDIR}"
+        create -d "${WEBDIR}"
+        create -d "${LOCAL_BIN}"
+
+        # Create files
+        create -f "${LOG_FILE}"
+        create -f "${DOMAINS_FILE}"
+        create -f "${IP_ADDR_FILE}"
+        create -f "${INFO_FILE}"
+        create -f "${FOXY_PROXY_CONFIG}"
+        create -f "${PAC_FILE}"
+
+        create_config_template
+
+        return 0
+    ;;
+    read)
+        if [[ -f "${CONFIG}" ]]; then
+            source "${CONFIG}" > /dev/null 2>&1
+        else
+            fail "Конфигурационный файл ${CONFIG} не найден. Запустите первичную инициализацю (init)"
+        fi
+    ;;
+    esac
+
+    #
+    # Set variables if undefined
+    #
+
+    set_if_undefined PROXY_IP              127.0.0.1
+    set_if_undefined PROXY_PORT            61942
+    set_if_undefined PROXY_AUTORESTART     true
+    set_if_undefined IP_CHECKER_HOST       ifconfig.me
+
+    set_if_undefined HTTP_SERVER_IP        127.0.0.1
+    set_if_undefined HTTP_SERVER_PORT      8080
+    set_if_undefined HTTP_AUTORESTART      true
+
+    set_if_undefined SSH_CONFIG        false
+    set_if_undefined SSH_CONFIG_FILE       "${HOME}/.ssh/config"
+    set_if_undefined SSH_HOST              localhost
+    set_if_undefined SSH_PORT              22
+    set_if_undefined SSH_USER              root
+    set_if_undefined SSH_IDENTITY          "${HOME}/.ssh/id_rsa"
+
+    set_if_undefined FILES_GEN_INTERVAL    10
+    set_if_undefined FILES_GEN_AUTORESTART false
+
+    HTTP_SERVER="${HTTP_SERVER_IP}:${HTTP_SERVER_PORT}"
+    PROXY_SERVER="${PROXY_IP}:${PROXY_PORT}"
+
+    #
+    # check variables
+    #
+
+    [[ "${PROXY_PORT}" = "${HTTP_SERVER_PORT}" ]] &&
+        fail "Для HTTP сервера и SSH Proxy указан одинаковый порт ${PROXY_PORT}. Назначьте разные порты"
+
+    [[ "${PROXY_PORT}" -lt 1024 ]] && [[ $(id -u) -ne 0 ]] &&
+        fail "Для SSH Proxy указан порт: ${PROXY_PORT}. Необходимы права супервользователя для использования порта ниже 1024"
+
+    [[ "${PROXY_PORT}" -gt 65535 ]] || [[ "${PROXY_PORT}" -lt 0 ]] &&
+        fail "Для SSH Proxy указан порт: ${PROXY_PORT}. Порт должен быть в диапазоне 0-65535"
+
+    [[ "${SSH_PORT}" -gt 65535 ]] || [[ "${SSH_PORT}" -lt 0 ]] &&
+        fail "Для SSH сервера указан порт: ${SSH_PORT}. Порт должен быть в диапазоне 0-65535"
+
+    [[ "${HTTP_SERVER_PORT}" -lt 1024 ]] && [[ $(id -u) -ne 0 ]] &&
+        fail "Для HTTP cервера указан порт: ${HTTP_SERVER_PORT}. Необходимы права супервользователя для использования порта ниже 1024"
+
+    [[ "${HTTP_SERVER_PORT}" -gt 65535 ]] || [[ "${HTTP_SERVER_PORT}" -lt 0 ]] &&
+        fail "Для HTTP cервера указан порт: ${HTTP_SERVER_PORT}. Порт должен быть в диапазоне 0-65535"
+
+    [[ ! -f "${SSH_IDENTITY}" ]] && ! is_enabled "${SSH_CONFIG}" &&
+        fail "Идентификационный файл SSH ${SSH_IDENTITY} не найден"
+
+}
+
+files_generator(){
+    local DOMAINS IP_ADDR LINE LAST_DOMAINS_HASH LAST_IPS_HASH PAC_URL
+
+    FILES_LOCKFILE="${LOCKFILES}/${FUNCNAME[0]:-${funcstack[1]}}.locked"
+
+    prepare_pac_data(){
+        DOMAINS=""
+        IP_ADDR=""
+        # Читаем домены из файла
+        if [[ -f "${DOMAINS_FILE}" ]]; then
+            while IFS= read -r LINE; do
+                # Добавляем домены в переменную DOMAINS
+                if [[ "${LINE}" ]]; then
+                    DOMAINS="${DOMAINS}\"${LINE}\", "
+                fi
+            done <"${DOMAINS_FILE}"
+        fi
+
+        # Читаем IP адреса/подсети из файла
+        if [[ -f "${IP_ADDR_FILE}" ]]; then
+            while IFS= read -r LINE; do
+                # Добавляем IP адреса в переменную IP_ADDR
+                if [[ "${LINE}" ]]; then
+                    IP_ADDR="${IP_ADDR}\"${LINE}\", "
+                fi
+            done <"${IP_ADDR_FILE}"
+        fi
+
+        # Удаление последней запятой и пробела
+        DOMAINS="${DOMAINS%, }"
+        IP_ADDR="${IP_ADDR%, }"
+    }
+
+    create_pac_file(){
+        cat << EOF > "${PAC_FILE}"
+//
+// Автосгенерированный PAC файл
+// Сгенерирован $(current_time) утилитой ${BASENAME}
+// Больше информации по PAC доступно по ссылке:
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/Proxy_servers_and_tunneling/Proxy_Auto-Configuration_PAC_file
+//
+
+// Домены для которых сработает проксирование
+var DOMAIN_LIST = [
+    ${DOMAINS}
+];
+
+// IP-адреса и подсети для которых сработает проксирование
+var IP_ADDRESS_LIST = [
+    ${IP_ADDR}
+];
+
+// Функция для проверки соответствия домена
+function isMatched(host, pattern) {
+    // Обработка подстановочного знака
+    if (pattern.startsWith('*.')) {
+        var domain = pattern.slice(2);
+        return host.endsWith(domain);
+    } 
+    return host === pattern;
+}
+
+// Функция для проверки, находится ли IP-адрес в подсети
+function ipInRange(ip, range) {
+    var ipParts = ip.split('.').map(Number);
+    var rangeParts = range.split('/');
+    var rangeBase = rangeParts[0].split('.').map(Number);
+    var mask = parseInt(rangeParts[1], 10);
+    
+    if (mask < 0 || mask > 32) {
+        return false; // Неверная маска
+    }
+    
+    var rangeBaseBinary = (rangeBase[0] << 24) | (rangeBase[1] << 16) | (rangeBase[2] << 8) | rangeBase[3];
+    var ipBinary = (ipParts[0] << 24) | (ipParts[1] << 16) | (ipParts[2] << 8) | ipParts[3];
+    
+    var maskBinary = (0xFFFFFFFF >>> (32 - mask)) << (32 - mask);
+    return (rangeBaseBinary & maskBinary) === (ipBinary & maskBinary);
+}
+
+// Функция для получения IP-адреса по доменному имени
+function getIpAddress(host) {
+    var ip = dnsResolve(host);
+    return ip;
+}
+
+// Основная функция, определяющая прокси для URL
+function FindProxyForURL(url, host) {
+    // Проверка наличия домена из URL в DOMAIN_LIST
+    for (var i = 0; i < DOMAIN_LIST.length; i++) {
+        if (isMatched(host, DOMAIN_LIST[i])) {
+            return "SOCKS ${PROXY_SERVER}; DIRECT";
+        }
+    }
+
+    // Получаем IP-адреса по имени хоста
+    var ip = getIpAddress(host);
+
+    // Проверка наличия IP адреса в IP_ADDRESS_LIST
+    for (var j = 0; j < IP_ADDRESS_LIST.length; j++) {
+        var ipEntry = IP_ADDRESS_LIST[j];
+        if (ipEntry.indexOf('/') !== -1) {
+            // Это подсеть
+            if (ipInRange(ip, ipEntry)) {
+                return "SOCKS ${PROXY_SERVER}; DIRECT";
+            }
+        } else {
+            // Это отдельный IP
+            if (ip === ipEntry) {
+                return "SOCKS ${PROXY_SERVER}; DIRECT";
+            }
+        }
+    }
+
+    return "DIRECT"; // Использовать прямое соединение если домен не в списке
+}
+EOF
+        log info "PAC файл сгенерирован по пути ${PAC_FILE}"
+        log info "URL для PAC: ${PAC_URL}"
+    }
+
+    create_info_file(){
+        cat << EOF > "${INFO_FILE}"
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Информация по настройке ${BASENAME}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            overflow: auto;
+            font-family: monospace;
+        }
+
+        section {
+            margin-bottom: 40px;
+        }
+
+        nav {
+            margin-bottom: 20px;
+        }
+
+        nav a {
+            margin-right: 15px;
+            text-decoration: none;
+            color: #007BFF;
+        }
+
+        nav a:hover {
+            text-decoration: underline;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 90%;
+            margin: 10px 0;
+            background-color: #ffffff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        td {
+            border: 1px solid #dee2e6;
+            padding: 12px;
+            text-align: left;
+            transition: background-color 0.2s;
+        }
+
+        th {
+            background-color: #e9ecef;
+            font-weight: bold;
+        }
+
+        tr:hover td {
+            background-color: #f1f1f1;
+        }
+
+        h2 {
+            color: #2196F3;
+        }
+
+        h4 {
+            color: #4CAF50;
+        }
+
+        ol {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <nav>
+        <a href="#main">Общая информация</a>
+        <a href="#quick-start">Первичная настройка</a>
+        <a href="#config-file">Параметры конфигурации</a>
+        <a href="#pac-settings">Настройка PAC</a>
+    </nav>
+
+    <section id="main">
+        <h1>Общая информация</h1>
+        <p><b>${BASENAME}</b> - скрипт на bash запускающий SOCKS прокси и простой HTTP сервер со сгенерированным Proxy Auto-Configuration (PAC).
+            <br>Изначально скрипт ${BASENAME} написан с целью запуска на Linux/Mac, но при необходимости может быть
+            запущен в Windows поверх <a href="https://learn.microsoft.com/ru-ru/windows/wsl/install"
+                target="_blank">WSL</a> или <a href="https://cygwin.com/" target="_blank">CygWin</a> </br>
+            <br>PAC файл автоматически генерируется скриптом ${BASENAME} при запуске или вручную по мере необходимости из файлов с доменами
+            <b>\${HOME}/.${BASENAME}/$(basename "${DOMAINS_FILE}")</b> и IP адресами <b>\${HOME}/.${BASENAME}/$(basename "${IP_ADDR_FILE}")</b></br>
+            <br>PAC содержит домены и IP-адреса ресурсов, а также прокси-сервер, через который нужно точечно перенаправлять трафик по указанным ресурсам.</br>
+            <br>Идея с PAC не нова, и уже имеется немалоизвестный проект <a
+                href="https://antizapret.prostovpn.org" target="_blank">АнтиЗапрет</a></li>
+            чем и вдохновлен ${BASENAME}</br>
+            Отличие от АнтиЗапрета заключается в использовании собственного прокси и пользовательских списков для проксирования.
+            <br>Прокси SOCKS запускается поверх SSH туннеля. SSH как туннель <b>выбран не случайно:</b></br>
+        <ul>
+            <li>Протокол SSH пока не блокируется</li>
+            <li>Не требует сложной настройки</li>
+            <li>SSH по умолчанию установлен на всех ОС из коробки</li>
+        </ul>
+        </p>
+    </section>
+
+    <section id="quick-start">
+        <h1>Первичная настройка</h1>
+        <p>
+        <h4>Настройки ниже необходимы если доступ к серверу по SSH не настроен</h4>
+        <ul>
+            <li>Генерируем ssh ключ без пароля:</li>
+            <pre><code>$ ssh-keygen -t ed25519 -N "" -C '${BASENAME}' -f \${HOME}/.ssh/ed25519_${BASENAME}</code></pre>
+            <li>Копируем содержимое в <b>\${HOME}/.ssh/ed25519_${BASENAME}.pub</b> в файл <b>~/.ssh/authorized_keys</b> на
+                удаленном сервере вручную или командой</li>
+            <pre><code>$ ssh-copy-id ИМЯ_ПОЛЬЗОВАТЕЛЯ_ВАШЕГО_СЕРВЕРА@IP_АДРЕС_ВАШЕГО_СЕРВЕРА</code></pre>
+            <li>В <b>\${HOME}/.ssh/config</b> добавляем конфиг:</li>
+            <pre><code>Host ${BASENAME}
+    HostName [IP_АДРЕС_ВАШЕГО_СЕРВЕРА]
+    User [ИМЯ_ПОЛЬЗОВАТЕЛЯ_ВАШЕГО_СЕРВЕРА]
+    IdentityFile ~/.ssh/ed25519_${BASENAME}.pub
+</code></pre>
+            <li>Пытаемся подключиться по SSH:</li>
+            <pre><code>$ ssh ${BASENAME}</code></pre>
+            если все ок, идем дальше, в противном случе разбираемся с SSH
+
+        </ul>
+
+        <h4> Настройка списка доменов и IP адресов для просирования</h4>
+        <p>Домены и IP адреса для проксирования указываются в файлах <b>\${HOME}/.${BASENAME}/$(basename "${DOMAINS_FILE}")</b> и
+            <b>\${HOME}/.${BASENAME}/$(basename "${IP_ADDR_FILE}")</b> соответственно. <br>Домены можно указывать с * тогда будут учтены все
+            поддомены родительского домена. Пример <b>$(basename "${DOMAINS_FILE}")</b> для проксирования YouTube:</br>
+        <pre><code>*.googlevideo.com
+*.youtube.com
+*.youtu.be
+*.ytimg.com
+*.ggpht.com
+play.google.com
+*.googleapis.com
+</code></pre>
+
+        <br>IP адреса настраиваются аналогично, только вместо * указывается подсеть. Пример <b>$(basename "${IP_ADDR_FILE}")</b> для
+        проксирования 2ip.ru по IP</br>
+        <pre><code>195.201.201.32 # IP сайта 2ip.ru
+172.19.12.16/29 # подсеть
+</code></pre>
+
+        При изменении файлов <b>\${HOME}/.${BASENAME}/$(basename "${DOMAINS_FILE}")</b> и
+        <b>\${HOME}/.${BASENAME}/$(basename "${IP_ADDR_FILE}")</b> необходимо перезапускать ${BASENAME} ИЛИ пререгенерировать файлы:
+        <pre><code>$ /path/to/${BASENAME} restart # команда перезапуска
+$ /path/to/${BASENAME} regen-files # перегенерировать файлы</code></pre>
+
+        </p>
+    </section>
+
+    <section id="config-file">
+        <h1>Параметры конфигурации</h1>
+        <p>Файл конфигурации по умолчанию расположен в <b>\${HOME}/.${BASENAME}/config</b> и позволяет задавать следующие переменные:</p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Переменная</th>
+                    <th>Значение по умолчанию</th>
+                    <th>Комментарий</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><b>PROXY_IP</b></td>
+                    <td>127.0.0.1</td>
+                    <td>IP адрес для запуска SSH прокси</td>
+                </tr>
+                <tr>
+                    <td><b>PROXY_PORT</b></td>
+                    <td>61942</td>
+                    <td>Порт для SSH прокси</td>
+                </tr>
+                <tr>
+                    <td><b>PROXY_AUTORESTART</b></td>
+                    <td>true</td>
+                    <td>Рестарт SSH Proxy при аварийном завершении</td>
+                </tr>
+                <tr>
+                    <td><b>FILES_GEN_AUTORESTART</b></td>
+                    <td>false</td>
+                    <td>Автоматически перегенерировать файлы для HTTP сервера при изменении файла с доменами или IP адресами
+                    </td>
+                </tr>
+                <tr>
+                    <td><b>FILES_GEN_INTERVAL</b></td>
+                    <td>10</td>
+                    <td>Интервал проверки файла на наличие изменений в секундах. Не используется при FILES_GEN_AUTORESTART=false</td>
+                </tr>
+                <tr>
+                    <td><b>IP_CHECKER_HOST</b></td>
+                    <td>ifconfig.me</td>
+                    <td>Внешний хост для проверки работы прокси. При обращении должен возвращать IP адрес</td>
+                </tr>
+                <tr>
+                    <td><b>HTTP_SERVER_IP</b></td>
+                    <td>127.0.0.1</td>
+                    <td>IP адрес HTTP сервера</td>
+                </tr>
+                <tr>
+                    <td><b>HTTP_SERVER_PORT</b></td>
+                    <td>8080</td>
+                    <td>Порт для HTTP сервера</td>
+                </tr>
+                <tr>
+                    <td><b>HTTP_AUTORESTART</b></td>
+                    <td>true</td>
+                    <td>Рестарт HTTP сервера при аварийном завершении</td>
+                </tr>
+                <tr>
+                    <td><b>SSH_CONFIG</b></td>
+                    <td>true</td>
+                    <td>Использовать SSH конфиг файл SSH_CONFIG_FILE для прокси</td>
+                </tr>
+                <tr>
+                    <td><b>SSH_CONFIG_FILE</b></td>
+                    <td>\${HOME}/.ssh/config</td>
+                    <td>Путь к SSH конфигу</td>
+                </tr>
+                <tr>
+                    <td><b>SSH_HOST</b></td>
+                    <td>${BASENAME}</td>
+                    <td>Хост для организации SSH подключения. Если SSH_CONFIG=true то хост из конфига указанного в
+                        переменной SSH_CONFIG_FILE,
+                        в противном случае - хост для прямого подключения</td>
+                </tr>
+                <tr>
+                    <td><b>SSH_PORT</b></td>
+                    <td>22</td>
+                    <td>Порт SSH удаленного хоста. Не используется при SSH_CONFIG=true</td>
+                </tr>
+                <tr>
+                    <td><b>SSH_IDENTITY</b></td>
+                    <td>\${HOME}/.ssh/id_rsa</td>
+                    <td>SSH ключ для подключения к удаленному хосту. Не используется при SSH_CONFIG=true</td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <section id="pac-settings">
+        <h1>Настройка PAC</h3>
+            <p>Ниже описаны инстукции для настройки PAC в браузерах и ОС</p>
+            <h3>Настройка на уровне браузера</h3>
+            <h4>Для Chrome, Яндекс, Vivaldi, Opera, Edge:</h4>
+            <ol>
+                <li>Установить расширение <a href="https://chromewebstore.google.com/search/FoxyProxy"
+                        target="_blank">FoxyProxy</a></li>
+                <li>Открыть настройки расширения <strong>FoxyProxy</strong></li>
+                <li>Перейти в: <strong>Настройки > Импортировать настройки > Import from URL</strong></li>
+                <li>Вставить ссылку <a href="http://${HTTP_SERVER}/$(basename " ${FOXY_PROXY_CONFIG}")"
+                        target="_blank">http://${HTTP_SERVER}/$(basename "${FOXY_PROXY_CONFIG}")</a></li>
+                <li>Нажмите кнопку <strong>Импортировать настройки</strong>, затем <strong>Сохранить</strong></li>
+                <li>Нажмите на иконку <strong>FoxyProxy</strong> в панели задач браузера и выберите
+                    <strong>${BASENAME}</strong>
+                </li>
+            </ol>
+
+            <h4>Для Firefox:</h4>
+            <ol>
+                <li>Перейдите в: <strong>Меню > Настройки > Основные > Настройки сети > Настроить</strong>.</li>
+                <li>Вставьте ссылку <a href="${PAC_URL}" target="_blank">${PAC_URL}</a> в поле "<strong>URL
+                        автоматической
+                        настройки прокси</strong>" (<a
+                        href="https://support.mozilla.org/ru/kb/parametry-soedineniya-v-firefox"
+                        target="_blank">подробнее</a>)</li>
+                <li>Или воспользуйтесь расширением <a
+                        href="https://addons.mozilla.org/ru/firefox/addon/foxyproxy-standard/"
+                        target="_blank">FoxyProxy</a> и настройте по инструкции выше.</li>
+            </ol>
+
+            <h3>Настройка на уровне ОС</h3>
+            <h4>Linux (Gnome):</h4>
+            <ol>
+                <li>Откройте <strong>Настройки > Сеть > Прокси</strong></li>
+                <li>Активируйте <strong>Сетевой прокси</strong></li>
+                <li>В выпадающем списке <strong>Конфигурация</strong> выберите <strong>Автоматически</strong></li>
+                <li>В поле <strong>URL конфигурации</strong> вставьте <a href="${PAC_URL}"
+                        target="_blank">${PAC_URL}</a>
+                </li>
+            </ol>
+            <h4>macOS:</h4>
+            <ol>
+                <li>В меню <strong>Apple > Системные настройки</strong> выберите <strong>Сеть</strong>.</li>
+                <li>Справа выберите сетевую службу, затем нажмите <strong>Подробнее</strong></li>
+                <li>Перейдите на вкладку <strong>Прокси</strong></li>
+                <li>Включите <strong>Автоконфигурацию прокси</strong>, затем введите адрес <a href="${PAC_URL}"
+                        target="_blank">${PAC_URL}</a>.</li>
+                <li>Нажмите <strong>ОК</strong></li>
+            </ol>
+            <h4>Windows 10:</h4>
+            <ol>
+                <li>Откройте настройки: <strong>Пуск > Параметры > Сеть и Интернет > Proxy</strong>.</li>
+                <li>Включите <strong>Использовать сценарий установки</strong></li>
+                <li>В поле <strong>Адрес скрипта</strong> введите адрес <a href="${PAC_URL}"
+                        target="_blank">${PAC_URL}</a>
+                    и нажмите <strong>Сохранить</strong></li>
+            </ol>
+            <h4>Windows 11:</h4>
+            <ol>
+                <li>Откройте настройки: <strong>Пуск > Параметры > Сеть и Интернет > Proxy</strong>.</li>
+                <li>Выберите <strong>Настроить</strong> рядом с пунктом <strong>Использовать сценарий
+                        установки</strong>.
+                </li>
+                <li>В диалоговом окне <strong>Изменение скрипта установки</strong> включите опцию, введите адрес <a
+                        href="${PAC_URL}" target="_blank">${PAC_URL}</a> и нажмите <strong>Сохранить</strong>.</li>
+            </ol>
+    </section>
+
+</body>
+
+</html>
+EOF
+        log info "Инструкция по работе c ${BASENAME} доступна по ссылке http://${HTTP_SERVER}/$(basename "${INFO_FILE}")"
+    }
+
+    create_foxy_proxy_config(){
+        cat <<EOF >"${FOXY_PROXY_CONFIG}"
+{
+  "mode": "${PAC_URL}",
+  "sync": false,
+  "autoBackup": false,
+  "passthrough": "",
+  "theme": "",
+  "container": {
+    "container-1": "",
+    "container-2": "",
+    "container-3": "",
+    "container-4": "",
+    "incognito": ""
+  },
+  "commands": {
+    "quickAdd": "",
+    "setProxy": "",
+    "setTabProxy": ""
+  },
+  "data": [
+    {
+      "active": true,
+      "cc": "",
+      "city": "",
+      "color": "#4b0082",
+      "exclude": [],
+      "hostname": "${HTTP_SERVER_IP}",
+      "include": [],
+      "pac": "${PAC_URL}",
+      "pacString": "",
+      "password": "",
+      "port": "${HTTP_SERVER_PORT}",
+      "proxyDNS": true,
+      "title": "${BASENAME}",
+      "type": "pac",
+      "username": ""
+    }
+  ]
+}
+EOF
+        log info "Конфиг для FoxyProxy сгенерирован по пути ${FOXY_PROXY_CONFIG}"
+        log info "URL для FoxyProxy: http://${HTTP_SERVER}/$(basename "${FOXY_PROXY_CONFIG}")"
+    }
+
+    is_running(){
+        [[ -f "${FILES_LOCKFILE}" ]]
+    }
+
+    case $1 in
+    start | regen-files)
+        LAST_DOMAINS_HASH=$(md5sum "${DOMAINS_FILE}" | awk '{print $1}')
+        LAST_IPS_HASH=$(md5sum "${IP_ADDR_FILE}" | awk '{print $1}')
+        PAC_URL="http://${HTTP_SERVER}/proxy.pac"
+
+        prepare_pac_data
+        create_pac_file
+        create_foxy_proxy_config
+        create_info_file
+
+        if is_enabled "${FILES_GEN_AUTORESTART}"; then
+            create -f "${FILES_LOCKFILE}"
+            (while is_running && http_server is_running; do
+
+                sleep "${FILES_GEN_INTERVAL}" # интервал проверки в секундах
+
+                # Получаем текущую хэш-сумму
+                if [[ -f "${DOMAINS_FILE}" ]]; then
+                    CURRENT_DOMAINS_HASH=$(md5sum "${DOMAINS_FILE}" | awk '{print $1}')
+                fi
+                if [[ -f "${IP_ADDR_FILE}" ]]; then
+                    CURRENT_IPS_HASH=$(md5sum "${IP_ADDR_FILE}" | awk '{print $1}')
+                fi
+
+
+                # Сравниваем хэш-суммы
+                if [[ "${LAST_DOMAINS_HASH}${LAST_IPS_HASH}" != "${CURRENT_DOMAINS_HASH}${CURRENT_IPS_HASH}" ]]; then
+                    prepare_pac_data
+                    create_pac_file
+                    LAST_DOMAINS_HASH="${CURRENT_DOMAINS_HASH}"
+                    LAST_IPS_HASH="${CURRENT_IPS_HASH}" 
+                fi
+            done &) > /dev/null 2>&1
+        fi
+    ;;
+    stop)
+        rm -rf "${FILES_LOCKFILE}" > /dev/null 2>&1
+        if is_running; then
+            log info "Завершение работы фонового обновления PAC файла"
+        else
+            log info "Нечего останавливать. Фоновое обновление PAC файла не запущено"
+        fi
+    ;;
+    status)
+        if is_running; then
+            log info "Фоновое обновление PAC файла включено"
+        else
+            log info "Фоновое обновление PAC файла отключено"
+        fi
+    ;;
+    is-running)
+        is_running
+    ;;
+    esac
+}
+
+create_service_file(){
+    local SYSTEMD_DIRECTORY SERVICE_FILE SERVICE_NAME
+
+    SERVICE_NAME="${BASENAME}.service"
+    SYSTEMD_DIRECTORY="${HOME}/.config/systemd/user"
+    SERVICE_FILE="${SYSTEMD_DIRECTORY}/${SERVICE_NAME}"
+
+    if is_linux && is_systemd; then
+        if [[ -f "${SERVICE_FILE}" ]]; then
+            log info "В ${SYSTEMD_DIRECTORY} уже имеется service файл ${SERVICE_NAME}"
+            return 0
+        fi
+
+        create -d "${SYSTEMD_DIRECTORY}"
+        create -f "${SERVICE_FILE}"
+
+        cat << EOF > "${SERVICE_FILE}"
+[Unit]
+Description=${BASENAME} service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${EXEC_FILE} start -D
+ExecStop=${EXEC_FILE} stop
+ExecReload=${EXEC_FILE} restart
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+        if [[ -f "${SERVICE_FILE}" ]]; then
+            systemctl --user daemon-reload
+            log info "Пользовательский сервис файл ${SERVICE_NAME} для пользователя ${USER} создан. Управление: systemctl --user [enable|start|stop|restart] ${BASENAME}"
+        else
+            fail "Не удалось создать сервис файл ${SERVICE_FILE}"
+        fi
+
+        elif is_linux; then
+            log warn "Ваша система не использует systemd, нельзя создать service файл"
+        else
+            log warn "Ваша система не основана на ядре Linux, нельзя создать service файл"
+        fi
+}
+
+create_exec_file(){
+    if [[ -f "${EXEC_FILE}" ]]; then
+        log info "В ${LOCAL_BIN} уже имеется service файл ${BASENAME}"
+        return 0
+    fi
+
+    log info "Копирование текущего файла в ${EXEC_FILE}"
+
+    cp "${FULL_PATH}" "${EXEC_FILE}" > /dev/null 2>&1
+
+    if [[ -f "${EXEC_FILE}" ]]; then
+        chmod +x "${EXEC_FILE}"
+    else
+        fail "Не удалось создать исполняемый файл ${EXEC_FILE}"
+    fi
+}
+
+print_help(){
+
+    cat <<EOF
+
+Пример использования: ${BASENAME} [команда]
+
+Доступные команды:
+  init             Первичная инициализация
+
+  start            Запустить ${BASENAME}
+
+  stop             Остановить ${BASENAME}
+
+  restart          Перезапустить ${BASENAME}
+
+  status           Показать текущий статус ${BASENAME}
+
+  regen-files      Перегенерировать файлы веб сервера
+                   В список входят файлы PAC, конфиг FoxyProxy, инструкция
+
+  create-service   Создать пользовательский service файл для систем с systemd
+                   Позволяет управлять скриптом через systemctl
+
+  help             Показать справку
+
+EOF
+}
+
+main(){
+    BASENAME="smart-proxy"
+    LOCAL_BIN="${HOME}/.local/bin"
+    EXEC_FILE="${LOCAL_BIN}/${BASENAME}"
+    WORKDIR="${WORKDIR:-${HOME}/.${BASENAME}}"
+
+    is_bash && FULL_PATH=$(readlink -f "$0")
+    is_zsh  && FULL_PATH=$(readlink -f "${(%):-%x}") 
+
+    case "$1" in
+    start)
+        config read
+
+        http_server $1
+        check_http_server
+        files_generator $1
+
+        ssh_proxy $1
+        check_ssh_proxy
+
+
+        # костыль необходимый при запуске через systemd чтобы скрипт постоянно "висел"
+        # иначе systemd завершает фоновые процессы скрипта после завершения основной функции
+        while [[ "$2" = "-D" ]]; do
+            SYSTEMD_LOGS=${SYSTEMD_LOGS:-true}
+            if ssh_proxy is-running || http_server is-running; then
+                sleep 10
+            else
+                shift
+            fi
+        done
+        return 0
+    ;;
+    restart)
+        ${FUNCNAME[0]:-${funcstack[1]}} stop
+        sleep 1
+        ${FUNCNAME[0]:-${funcstack[1]}} start
+    ;;
+    status | stop)
+        config read
+        ssh_proxy $1
+        http_server $1
+        return 0
+    ;;
+    init)
+        config init
+        create_exec_file
+        return 0
+    ;;
+    create-service)
+        config read
+        create_exec_file
+        create_service_file
+    ;;
+    regen-files)
+        config read
+        files_generator $1
+    ;;
+    *)
+        print_help
+        return 0
+    ;;
+    esac
+}
+
+# shellcheck disable=SC2068 # Double quote array expansions to avoid re-splitting elements.
+main $@
