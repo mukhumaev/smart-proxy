@@ -11,7 +11,7 @@
 **smart-proxy** - скрипт на bash запускающий SOCKS прокси и простой HTTP сервер со сгенерированным Proxy Auto-Configuration (PAC).  
 Изначально скрипт smart-proxy написан с целью запуска на Linux/Mac, но при необходимости может быть запущен в Windows поверх [WSL](https://learn.microsoft.com/ru-ru/windows/wsl/install) или [CygWin](https://cygwin.com/)  
   
-PAC файл автоматически генерируется скриптом smart-proxy при запуске или вручную по мере необходимости из файлов с доменами `${HOME}/.smart-proxy/domains_list` и IP адресами `${HOME}/.smart-proxy/ips_list`
+PAC файл автоматически генерируется при запуске или вручную по мере необходимости из файла с хостами `${HOME}/.smart-proxy/hosts_list`
   
 PAC содержит домены и IP-адреса ресурсов, а также прокси-сервер, через который нужно точечно перенаправлять трафик по указанным ресурсам.  
   
@@ -78,26 +78,25 @@ PAC содержит домены и IP-адреса ресурсов, а так
 
 #### Настройка списка доменов и IP адресов для просирования
 
-Домены и IP адреса для проксирования указываются в файлах `${HOME}/.smart-proxy/domains_list` и `${HOME}/.smart-proxy/ips_list` соответственно.  
-Домены можно указывать с \* тогда будут учтены все поддомены родительского домена. Пример `domains_list` для проксирования YouTube:  
+Домены и IP адреса для проксирования указываются в файле `${HOME}/.smart-proxy/hosts_list`.  
+Домены можно указывать с \* тогда будут учтены все поддомены родительского домена. Пример `hosts_list` для проксирования YouTube:  
 ```
 *.googlevideo.com
 *.youtube.com
 *.youtu.be
 *.ytimg.com
 *.ggpht.com
-play.google.com
-*.googleapis.com
+*.youtubei.googleapis.com
 ```
 
-IP адреса настраиваются аналогично, только вместо \* указывается подсеть. Пример `ips_list` для проксирования 2ip.ru по IP и подсети `172.19.12.16/29`:
+IP адреса настраиваются аналогично, только вместо \* указывается подсеть. Пример для проксирования 2ip.ru по IP и подсети `172.19.12.16/29`:
 ```
 195.201.201.32  # IP сайта 2ip.ru
 172.19.12.16/29 # подсеть
 ```
     
 
-При изменении файлов `${HOME}/.smart-proxy/domains_list` и `${HOME}/.smart-proxy/ips_list` необходимо перезапускать smart-proxy ИЛИ пререгенерировать файлы:
+При изменении файла `${HOME}/.smart-proxy/hosts_list` необходимо перезапускать smart-proxy ИЛИ пререгенерировать файлы:
 ```
 $ /path/to/smart-proxy restart # команда перезапуска
 $ /path/to/smart-proxy regen-files # перегенерировать файлы
@@ -111,7 +110,7 @@ $ /path/to/smart-proxy regen-files # перегенерировать файлы
 |-|-|-|
 |**PROXY\_IP**|127.0.0.1|IP адрес для запуска SSH прокси|
 |**PROXY\_PORT**|61942|Порт для SSH прокси|
-|**PROXY\_AUTORESTART**|true|Рестарт SSH Proxy при аварийном завершении|
+|**PROXY\_AUTORESTART**|true|Рестарт SSH прокси при аварийном завершении|
 |**FILES\_GEN\_AUTORESTART**|false|Автоматически перегенерировать файлы для HTTP сервера при изменении файла с доменами или IP адресами|
 |**FILES\_GEN\_INTERVAL**|10|Интервал проверки файла на наличие изменений в секундах. Не используется при FILES\_GEN\_AUTORESTART=false|
 |**IP\_CHECKER\_HOST**|ifconfig.me|Внешний хост для проверки работы прокси. При обращении через curl должен возвращать IP адрес. Пример таких сервисов: 2ip.ru, eth0.me, icanhazip.com, api64.ipify.org, ipinfo.io/ip|
@@ -156,6 +155,11 @@ $ /path/to/smart-proxy regen-files # перегенерировать файлы
 3.  В выпадающем списке **Конфигурация** выберите **Автоматически**
 4.  В поле **URL конфигурации** вставьте [http://127.0.0.1:8080/proxy.pac](http://127.0.0.1:8080/proxy.pac)
 
+Аналогичная настройка через терминал:
+```
+$ gsettings set org.gnome.system.proxy mode 'auto'
+$ gsettings set org.gnome.system.proxy autoconfig-url 'http://127.0.0.1:8080/proxy.pac'
+```
 #### macOS:
 
 1.  В меню **Apple > Системные настройки** выберите **Сеть**.
