@@ -29,11 +29,43 @@ is_systemd(){
 }
 
 is_bash(){
-    [[ "${BASH_VERSION}" ]]
+    [[ "${BASH_VERSION}" ]] || \
+    tr '\0' '\n' < /proc/$$/cmdline | grep -q bash
 }
 
 is_zsh(){
-    [[ "${ZSH_VERSION}" ]]
+    [[ "${ZSH_VERSION}" ]] || \
+    tr '\0' '\n' < /proc/$$/cmdline | grep -q zsh
+}
+
+is_ipv4(){
+    local ADDRESS MASK OCTET OCTET_COUNT
+
+    ADDRESS="$1"
+
+    OCTET_COUNT=$(tr '.' '\n' <<< "${ADDRESS}" | wc -l)
+
+    [ "${OCTET_COUNT}" -eq 4 ] || return 1
+
+    is_positive_number(){
+        [ "$(grep -oE "[0-9]{1,}" <<< "$1")" = "$1" ]
+    }
+
+    if grep -q '/' <<< "${ADDRESS}"; then
+        MASK=$(cut -d '/' -f 2 <<< "${ADDRESS}")
+        ADDRESS=$(cut -d '/' -f 1 <<< "${ADDRESS}")
+
+        is_positive_number "${MASK}" || return 1
+
+        { [ "${MASK}" -ge 0 ] && [ "${MASK}" -le 32 ] ;} || return 1
+    fi
+
+    for OCTET in $(tr "." " " <<< "${ADDRESS}"); do
+        is_positive_number "${OCTET}" || return 1
+        { [ "${OCTET}" -ge 0 ] && [ "${OCTET}" -le 255 ] ;} || return 1
+    done
+
+    return 0
 }
 
 tcp_port_info(){
@@ -417,8 +449,7 @@ EOF
     ### FILES
     LOG_FILE="${WORKDIR}/log.txt"
     CONFIG="${WORKDIR}/config"
-    DOMAINS_FILE="${WORKDIR}/domains_list"
-    IP_ADDR_FILE="${WORKDIR}/ips_list"
+    HOSTS_FILE="${WORKDIR}/hosts_list"
     INFO_FILE="${WEBDIR}/info"
     FOXY_PROXY_CONFIG="${WEBDIR}/foxy_proxy.json"
     PAC_FILE="${WEBDIR}/proxy.pac"
@@ -436,8 +467,7 @@ EOF
 
         # Create files
         create -f "${LOG_FILE}"
-        create -f "${DOMAINS_FILE}"
-        create -f "${IP_ADDR_FILE}"
+        create -f "${HOSTS_FILE}"
         create -f "${INFO_FILE}"
         create -f "${FOXY_PROXY_CONFIG}"
         create -f "${PAC_FILE}"
@@ -509,33 +539,27 @@ EOF
 }
 
 files_generator(){
-    local DOMAINS IP_ADDR LINE LAST_DOMAINS_HASH LAST_IPS_HASH PAC_URL
+    local DOMAINS IP_ADDR LINE LAST_HOSTS_HASH PAC_URL
 
     FILES_LOCKFILE="${LOCKFILES}/${FUNCNAME[0]:-${funcstack[1]}}.locked"
 
     prepare_pac_data(){
         DOMAINS=""
         IP_ADDR=""
-        # Читаем домены из файла
-        if [[ -f "${DOMAINS_FILE}" ]]; then
+        # Читаем хосты из файла
+        if [[ -f "${HOSTS_FILE}" ]]; then
             while IFS= read -r LINE; do
-                # Добавляем домены в переменную DOMAINS
                 if [[ "${LINE}" ]]; then
-                    DOMAINS="${DOMAINS}\"${LINE}\", "
+                    # Удаляем комментарий, если указано после хоста
+                    LINE=$(tr -d ' \t' <<< "${LINE}" | cut -d '#' -f 1 )
+                    if is_ipv4 "${LINE}"; then
+                        IP_ADDR="${IP_ADDR}\"${LINE}\", "
+                    else
+                        DOMAINS="${DOMAINS}\"${LINE}\", "
+                    fi
                 fi
-            done <"${DOMAINS_FILE}"
+            done < <(grep -vE '^([[:space:]]*#|$)' "${HOSTS_FILE}" | sort -u)
         fi
-
-        # Читаем IP адреса/подсети из файла
-        if [[ -f "${IP_ADDR_FILE}" ]]; then
-            while IFS= read -r LINE; do
-                # Добавляем IP адреса в переменную IP_ADDR
-                if [[ "${LINE}" ]]; then
-                    IP_ADDR="${IP_ADDR}\"${LINE}\", "
-                fi
-            done <"${IP_ADDR_FILE}"
-        fi
-
         # Удаление последней запятой и пробела
         DOMAINS="${DOMAINS%, }"
         IP_ADDR="${IP_ADDR%, }"
@@ -727,8 +751,8 @@ EOF
             <br>Изначально скрипт ${BASENAME} написан с целью запуска на Linux/Mac, но при необходимости может быть
             запущен в Windows поверх <a href="https://learn.microsoft.com/ru-ru/windows/wsl/install"
                 target="_blank">WSL</a> или <a href="https://cygwin.com/" target="_blank">CygWin</a> </br>
-            <br>PAC файл автоматически генерируется скриптом ${BASENAME} при запуске или вручную по мере необходимости из файлов с доменами
-            <b>\${HOME}/.${BASENAME}/$(basename "${DOMAINS_FILE}")</b> и IP адресами <b>\${HOME}/.${BASENAME}/$(basename "${IP_ADDR_FILE}")</b></br>
+            <br>PAC файл автоматически генерируется при запуске или вручную по мере необходимости из файла с хостами
+            <b>\${HOME}/.${BASENAME}/$(basename "${HOSTS_FILE}")</b></br>
             <br>PAC содержит домены и IP-адреса ресурсов, а также прокси-сервер, через который нужно точечно перенаправлять трафик по указанным ресурсам.</br>
             <br>Идея с PAC не нова, и уже имеется немалоизвестный проект <a
                 href="https://antizapret.prostovpn.org" target="_blank">АнтиЗапрет</a></li>
@@ -770,26 +794,23 @@ EOF
         </ul>
 
         <h4> Настройка списка доменов и IP адресов для просирования</h4>
-        <p>Домены и IP адреса для проксирования указываются в файлах <b>\${HOME}/.${BASENAME}/$(basename "${DOMAINS_FILE}")</b> и
-            <b>\${HOME}/.${BASENAME}/$(basename "${IP_ADDR_FILE}")</b> соответственно. <br>Домены можно указывать с * тогда будут учтены все
-            поддомены родительского домена. Пример <b>$(basename "${DOMAINS_FILE}")</b> для проксирования YouTube:</br>
+        <p>Домены и IP адреса для проксирования указываются в файле <b>\${HOME}/.${BASENAME}/$(basename "${HOSTS_FILE}")</b>. <br>Домены можно указывать с * тогда будут учтены все
+            поддомены родительского домена. Пример <b>$(basename "${HOSTS_FILE}")</b> для проксирования YouTube:</br>
         <pre><code>*.googlevideo.com
 *.youtube.com
 *.youtu.be
 *.ytimg.com
 *.ggpht.com
-play.google.com
-*.googleapis.com
+*.youtubei.googleapis.com
 </code></pre>
 
-        <br>IP адреса настраиваются аналогично, только вместо * указывается подсеть. Пример <b>$(basename "${IP_ADDR_FILE}")</b> для
+        <br>IP адреса настраиваются аналогично, только вместо * указывается подсеть. Пример для
         проксирования 2ip.ru по IP</br>
         <pre><code>195.201.201.32  # IP сайта 2ip.ru
 172.19.12.16/29 # подсеть
 </code></pre>
 
-        При изменении файлов <b>\${HOME}/.${BASENAME}/$(basename "${DOMAINS_FILE}")</b> и
-        <b>\${HOME}/.${BASENAME}/$(basename "${IP_ADDR_FILE}")</b> необходимо перезапускать ${BASENAME} ИЛИ пререгенерировать файлы:
+        При изменении файла <b>\${HOME}/.${BASENAME}/$(basename "${HOSTS_FILE}")</b> необходимо перезапускать ${BASENAME} ИЛИ пререгенерировать файлы:
         <pre><code>$ /path/to/${BASENAME} restart # команда перезапуска
 $ /path/to/${BASENAME} regen-files # перегенерировать файлы</code></pre>
 
@@ -821,7 +842,7 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
                 <tr>
                     <td><b>PROXY_AUTORESTART</b></td>
                     <td>true</td>
-                    <td>Рестарт SSH Proxy при аварийном завершении</td>
+                    <td>Рестарт SSH прокси при аварийном завершении</td>
                 </tr>
                 <tr>
                     <td><b>FILES_GEN_AUTORESTART</b></td>
@@ -929,6 +950,9 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
                 <li>В поле <strong>URL конфигурации</strong> вставьте <a href="${PAC_URL}"
                         target="_blank">${PAC_URL}</a>
                 </li>
+                <p>Аналогичная настройка через терминал:</p>
+                <pre><code>$ gsettings set org.gnome.system.proxy mode 'auto'
+$ gsettings set org.gnome.system.proxy autoconfig-url '${PAC_URL}'</code></pre>
             </ol>
             <h4>macOS:</h4>
             <ol>
@@ -1016,8 +1040,7 @@ EOF
 
     case $1 in
     start | regen-files)
-        LAST_DOMAINS_HASH=$(md5sum "${DOMAINS_FILE}" | awk '{print $1}')
-        LAST_IPS_HASH=$(md5sum "${IP_ADDR_FILE}" | awk '{print $1}')
+        LAST_HOSTS_HASH=$(md5sum "${HOSTS_FILE}" | awk '{print $1}')
         PAC_URL="http://${HTTP_SERVER}/proxy.pac"
 
         prepare_pac_data
@@ -1032,20 +1055,15 @@ EOF
                 sleep "${FILES_GEN_INTERVAL}" # интервал проверки в секундах
 
                 # Получаем текущую хэш-сумму
-                if [[ -f "${DOMAINS_FILE}" ]]; then
-                    CURRENT_DOMAINS_HASH=$(md5sum "${DOMAINS_FILE}" | awk '{print $1}')
+                if [[ -f "${HOSTS_FILE}" ]]; then
+                    CURRENT_HOSTS_HASH=$(md5sum "${HOSTS_FILE}" | awk '{print $1}')
                 fi
-                if [[ -f "${IP_ADDR_FILE}" ]]; then
-                    CURRENT_IPS_HASH=$(md5sum "${IP_ADDR_FILE}" | awk '{print $1}')
-                fi
-
 
                 # Сравниваем хэш-суммы
-                if [[ "${LAST_DOMAINS_HASH}${LAST_IPS_HASH}" != "${CURRENT_DOMAINS_HASH}${CURRENT_IPS_HASH}" ]]; then
+                if [[ "${LAST_HOSTS_HASH}" != "${CURRENT_HOSTS_HASH}" ]]; then
                     prepare_pac_data
                     create_pac_file
-                    LAST_DOMAINS_HASH="${CURRENT_DOMAINS_HASH}"
-                    LAST_IPS_HASH="${CURRENT_IPS_HASH}" 
+                    LAST_HOSTS_HASH="${CURRENT_HOSTS_HASH}"
                 fi
             done &) > /dev/null 2>&1
         fi
@@ -1105,6 +1123,7 @@ EOF
             systemctl --user daemon-reload
             log info "Пользовательский сервис файл ${SERVICE_NAME} для пользователя ${USER} создан"
             log info "Управление: systemctl --user [status|start|stop|restart] ${BASENAME}"
+            log info "Включить автозапуск: systemctl --user enable ${BASENAME}"
         else
             fail "Не удалось создать сервис файл ${SERVICE_FILE}"
         fi
@@ -1234,6 +1253,8 @@ main(){
     ;;
     esac
 }
+
+##############################################################
 
 # shellcheck disable=SC2068 # Double quote array expansions to avoid re-splitting elements.
 main $@
