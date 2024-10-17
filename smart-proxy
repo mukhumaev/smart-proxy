@@ -1168,9 +1168,9 @@ print_help(){
 
   status           Показать текущий статус ${BASENAME}
 
-  daemon           Используется для выполнения команд в service файлах. 
-                   Поддерживаемые команды: start, stop, restart. 
-                   При передаче команды 'start' процесс продолжает выполнение и не завершается. 
+  daemon           Используется для выполнения команд в service файлах.
+                   Поддерживаемые команды: start, stop, restart.
+                   При передаче команды 'start' процесс продолжает выполнение и не завершается.
                    Это необходимо для обеспечения работы фоновых процессов скрипта.
 
   regen-files      Перегенерировать файлы веб сервера
@@ -1179,6 +1179,10 @@ print_help(){
   create-service   Создать пользовательский service файл для систем с systemd
                    Позволяет управлять скриптом через systemctl
                    Работает только на Linux
+
+  hosts-edit       Редактирование файла с хостами. По умолчанию для этой операции используется редактор,
+                   указанный в системной переменной \$EDITOR. Если данная переменная не установлена,
+                   для редактирования будет применён редактор vi
 
   help             Показать справку
 
@@ -1192,7 +1196,7 @@ main(){
     WORKDIR="${WORKDIR:-${HOME}/.${BASENAME}}"
 
     is_bash && FULL_PATH=$(readlink -f "$0")
-    is_zsh  && FULL_PATH=$(readlink -f "${(%):-%x}") 
+    is_zsh  && FULL_PATH=$(readlink -f "${(%):-%x}")
 
     case "$1" in
     start)
@@ -1246,6 +1250,10 @@ main(){
     regen-files)
         config read
         files_generator $1
+    ;;
+    hosts-edit)
+        config read
+        eval "${EDITOR:-vi} ${HOSTS_FILE}"
     ;;
     *)
         print_help
