@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC1071 # ShellCheck only supports sh/bash/dash/ksh scripts. Sorry!
+# shellcheck disable=SC1071
+# ShellCheck only supports sh/bash/dash/ksh scripts. Sorry!
 
 #
 # Многие вещи можно было бы упростить или использовать готовые решения,
@@ -24,8 +25,7 @@ is_linux(){
 }
 
 is_systemd(){
-    is_linux || return 1
-    grep -q systemd < /proc/1/comm 
+    grep -q systemd < /proc/1/comm
 }
 
 is_bash(){
@@ -66,6 +66,10 @@ is_ipv4(){
     done
 
     return 0
+}
+
+file-hash(){
+    [ -f "$1" ] && sha1sum $1 | cut -d " " -f 1
 }
 
 tcp_port_info(){
@@ -253,8 +257,11 @@ http_server(){
     }
 
     start_http_server(){
-        # shellcheck disable=SC2016 # Expressions don't expand in single quotes, use double quotes for that.
-        # shellcheck disable=SC1078 # Did you forget to close this double-quoted string?
+        # shellcheck disable=SC2016
+        # Expressions don't expand in single quotes, use double quotes for that.
+
+        # shellcheck disable=SC1078
+        # Did you forget to close this double-quoted string?
         nc -vl "${HTTP_SERVER_IP}" "${HTTP_SERVER_PORT}" -c '(
             read -r first_LINE
             # Извлечение команды из запроса
@@ -340,7 +347,7 @@ http_server(){
     status)
         if is_running; then
             log info "HTTP сервер запущен на ${HTTP_SERVER}"
-        else 
+        else
             log info "HTTP сервер не запушен"
         fi
     ;;
@@ -357,7 +364,7 @@ check_http_server(){
         curl -sL --max-time 3 \
             -w "%{http_code}" \
             -o /dev/null \
-            "http://${HTTP_SERVER}" 
+            "http://${HTTP_SERVER}"
     )
 
     if [[ "${RESULT}" = "000" ]]; then
@@ -419,7 +426,7 @@ SSH_CONFIG_FILE="${HOME}/.ssh/config"
 # Удаленный хост для организации прокси (по умолчанию: localhost)
 # Указывается IP адрес или домен
 #
-# При использовании конфига (SSH_CONFIG=true) 
+# При использовании конфига (SSH_CONFIG=true)
 # указывается хост из конфига, иначе - хост для прямого подключения
 SSH_HOST=${BASENAME}
 
@@ -590,7 +597,7 @@ function isMatched(host, pattern) {
     if (pattern.startsWith('*.')) {
         var domain = pattern.slice(2);
         return host.endsWith(domain);
-    } 
+    }
     return host === pattern;
 }
 
@@ -600,14 +607,14 @@ function ipInRange(ip, range) {
     var rangeParts = range.split('/');
     var rangeBase = rangeParts[0].split('.').map(Number);
     var mask = parseInt(rangeParts[1], 10);
-    
+
     if (mask < 0 || mask > 32) {
         return false; // Неверная маска
     }
-    
+
     var rangeBaseBinary = (rangeBase[0] << 24) | (rangeBase[1] << 16) | (rangeBase[2] << 8) | rangeBase[3];
     var ipBinary = (ipParts[0] << 24) | (ipParts[1] << 16) | (ipParts[2] << 8) | ipParts[3];
-    
+
     var maskBinary = (0xFFFFFFFF >>> (32 - mask)) << (32 - mask);
     return (rangeBaseBinary & maskBinary) === (ipBinary & maskBinary);
 }
@@ -1253,7 +1260,16 @@ main(){
     ;;
     hosts-edit)
         config read
+
+        OLD_HASH=$(file-hash "${HOSTS_FILE}")
+
         eval "${EDITOR:-vi} ${HOSTS_FILE}"
+
+        NEW_HASH=$(file-hash "${HOSTS_FILE}")
+
+        if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
+            ${FUNCNAME[0]:-${funcstack[1]}} regen-files
+        fi
     ;;
     *)
         print_help
@@ -1264,5 +1280,6 @@ main(){
 
 ##############################################################
 
-# shellcheck disable=SC2068 # Double quote array expansions to avoid re-splitting elements.
+# shellcheck disable=SC2068
+# Double quote array expansions to avoid re-splitting elements.
 main $@
