@@ -110,13 +110,12 @@ $ /path/to/smart-proxy regen-files # перегенерировать файлы
 |-|-|-|
 |**PROXY\_IP**|127.0.0.1|IP адрес для запуска SSH прокси|
 |**PROXY\_PORT**|61942|Порт для SSH прокси|
-|**PROXY\_AUTORESTART**|true|Рестарт SSH прокси при аварийном завершении|
+|**PROXY\_AUTORESTART**|true|Рестарт прокси при аварийном завершении|
 |**FILES\_GEN\_AUTORESTART**|false|Автоматически перегенерировать файлы для HTTP сервера при изменении файла с доменами или IP адресами|
 |**FILES\_GEN\_INTERVAL**|10|Интервал проверки файла на наличие изменений в секундах. Не используется при FILES\_GEN\_AUTORESTART=false|
 |**IP\_CHECKER\_HOST**|ifconfig.me|Внешний хост для проверки работы прокси. При обращении через curl должен возвращать IP адрес. Пример таких сервисов: 2ip.ru, eth0.me, icanhazip.com, api64.ipify.org, ipinfo.io/ip|
 |**HTTP\_SERVER\_IP**|127.0.0.1|IP адрес HTTP сервера|
 |**HTTP\_SERVER\_PORT**|8080|Порт для HTTP сервера|
-|**HTTP\_AUTORESTART**|true|Рестарт HTTP сервера при аварийном завершении|
 |**SSH\_CONFIG**|true|Использовать SSH конфиг файл SSH\_CONFIG\_FILE для прокси|
 |**SSH\_CONFIG\_FILE**|${HOME}/.ssh/config|Путь к SSH конфигу|
 |**SSH\_HOST**|smart-proxy|Хост для организации SSH подключения. Если SSH\_CONFIG=true то хост из конфига указанного в переменной SSH\_CONFIG\_FILE, в противном случае - хост для прямого подключения|

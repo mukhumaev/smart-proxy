@@ -324,13 +324,9 @@ http_server(){
         create -f "${HTTP_LOCKFILE}"
 
         log info "Запускаю HTTP сервер ${HTTP_SERVER} в рабочей директории ${WEBDIR}"
-        if is_enabled "${HTTP_AUTORESTART}"; then
-            (while [[ -f "${HTTP_LOCKFILE}" ]]; do
-                start_http_server
-            done &) > /dev/null 2>&1
-        else
-           (start_http_server &) > /dev/null 2>&1
-        fi
+        (while [[ -f "${HTTP_LOCKFILE}" ]]; do
+            start_http_server
+        done &) > /dev/null 2>&1
         sleep 3
     ;;
     stop)
@@ -411,10 +407,6 @@ HTTP_SERVER_IP=127.0.0.1
 
 # Порт для HTTP сервера (по умолчанию: 8080)
 HTTP_SERVER_PORT=8080
-
-# Переменная, определяющая будет
-# ли перезапущен HTTP сервер при падении (по умолчанию: true)
-HTTP_AUTORESTART=true
 
 # Определяет стоит ли использовать SSH config (по умолчанию: true)
 SSH_CONFIG=true
@@ -503,7 +495,6 @@ EOF
 
     set_if_undefined HTTP_SERVER_IP        127.0.0.1
     set_if_undefined HTTP_SERVER_PORT      8080
-    set_if_undefined HTTP_AUTORESTART      true
 
     set_if_undefined SSH_CONFIG            false
     set_if_undefined SSH_CONFIG_FILE       "${HOME}/.ssh/config"
@@ -878,11 +869,6 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
                     <td>Порт для HTTP сервера</td>
                 </tr>
                 <tr>
-                    <td><b>HTTP_AUTORESTART</b></td>
-                    <td>true</td>
-                    <td>Рестарт HTTP сервера при аварийном завершении</td>
-                </tr>
-                <tr>
                     <td><b>SSH_CONFIG</b></td>
                     <td>true</td>
                     <td>Использовать SSH конфиг файл SSH_CONFIG_FILE для прокси</td>
@@ -1191,6 +1177,10 @@ print_help(){
                    указанный в системной переменной \$EDITOR. Если данная переменная не установлена,
                    для редактирования будет применён редактор vi
 
+  conf-edit        Редактирование конфигурационого файла. По умолчанию для этой операции используется редактор,
+                   указанный в системной переменной \$EDITOR. Если данная переменная не установлена,
+                   для редактирования будет применён редактор vi
+
   help             Показать справку
 
 EOF
@@ -1266,6 +1256,19 @@ main(){
         eval "${EDITOR:-vi} ${HOSTS_FILE}"
 
         NEW_HASH=$(file-hash "${HOSTS_FILE}")
+
+        if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
+            ${FUNCNAME[0]:-${funcstack[1]}} regen-files
+        fi
+    ;;
+    conf-edit)
+        config read
+
+        OLD_HASH=$(file-hash "${CONFIG}")
+
+        eval "${EDITOR:-vi} ${CONFIG}"
+
+        NEW_HASH=$(file-hash "${CONFIG}")
 
         if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
             ${FUNCNAME[0]:-${funcstack[1]}} regen-files
