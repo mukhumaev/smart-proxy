@@ -177,7 +177,7 @@ ssh_proxy(){
     case $1 in
     start)
         if is_running; then
-            log info "SSH Proxy уже запущен на ${PROXY_SERVER}"
+            log info "SSH Proxy уже запущен на ${PROXY_SERVER_URL}"
             return 0
         elif tcp_port_info --quiet "${PROXY_PORT}"; then
             log error "Не удалось запустить SSH Proxy. Порт ${PROXY_PORT} уже используется $(tcp_port_info "${PROXY_PORT}")"
@@ -185,7 +185,7 @@ ssh_proxy(){
 
         create -f "${SSH_LOCKFILE}"
 
-        log info "Запускаю SSH Proxy на ${PROXY_SERVER}"
+        log info "Запускаю SSH Proxy на ${PROXY_SERVER_URL}"
         if is_enabled "${PROXY_AUTORESTART}"; then
             (while [[ -f "${SSH_LOCKFILE}" ]]; do
                 start_ssh_proxy
@@ -198,7 +198,7 @@ ssh_proxy(){
     stop)
         rm -rf "${SSH_LOCKFILE}" > /dev/null 2>&1
         if is_running; then
-            log info "Завершение работы SSH Proxy ${PROXY_SERVER}"
+            log info "Завершение работы SSH Proxy ${PROXY_SERVER_URL}"
             for PID in ${PIDS}; do
                 (ps -p "${PID}" && kill -9 "${PID}") &> /dev/null
             done
@@ -208,7 +208,7 @@ ssh_proxy(){
     ;;
     status)
         if is_running; then
-            log info "SSH Proxy запущен на ${PROXY_SERVER}"
+            log info "SSH Proxy запущен на ${PROXY_SERVER_URL}"
         else
             log info "SSH Proxy не запушен"
         fi
@@ -224,7 +224,7 @@ check_ssh_proxy(){
 
     PROXY_IP=$(
         curl -sL --max-time 3 --socks5 \
-            "${PROXY_SERVER}" \
+            "${PROXY_SERVER_URL}" \
             "${IP_CHECKER_HOST}"
     )
 
@@ -234,7 +234,7 @@ check_ssh_proxy(){
     )
 
     if [[ -z "${PROXY_IP}" ]]; then
-        fail "Не удалось подключиться к ${IP_CHECKER_HOST} через прокси ${PROXY_SERVER}"
+        fail "Не удалось подключиться к ${IP_CHECKER_HOST} через прокси ${PROXY_SERVER_URL}"
     elif [[ "${CURRENT_IP}" ]] && [[ "${PROXY_IP}" ]]; then
         log info "Ваш IP-адрес от провайдера: ${CURRENT_IP}, IP-адрес через прокси: ${PROXY_IP}"
     fi
@@ -309,7 +309,7 @@ http_server(){
     case $1 in
     start)
         if is_running; then
-            log info "HTTP сервер ${HTTP_SERVER} уже запущен"
+            log info "HTTP сервер ${HTTP_SERVER_URL} уже запущен"
             return 0
         elif [[ ! -d "${WEBDIR}" ]]; then
             fail "Директория ${WEBDIR} не найдена"
@@ -323,7 +323,7 @@ http_server(){
 
         create -f "${HTTP_LOCKFILE}"
 
-        log info "Запускаю HTTP сервер ${HTTP_SERVER} в рабочей директории ${WEBDIR}"
+        log info "Запускаю HTTP сервер ${HTTP_SERVER_URL} в рабочей директории ${WEBDIR}"
         (while [[ -f "${HTTP_LOCKFILE}" ]]; do
             start_http_server
         done &) > /dev/null 2>&1
@@ -332,7 +332,7 @@ http_server(){
     stop)
         rm -rf "${HTTP_LOCKFILE}" > /dev/null 2>&1
         if is_running; then
-            log info "Завершение работы HTTP сервера ${HTTP_SERVER}"
+            log info "Завершение работы HTTP сервера ${HTTP_SERVER_URL}"
             for PID in ${PIDS}; do
                 (ps -p "${PID}" && kill -9 "${PID}") &> /dev/null
             done
@@ -342,7 +342,7 @@ http_server(){
     ;;
     status)
         if is_running; then
-            log info "HTTP сервер запущен на ${HTTP_SERVER}"
+            log info "HTTP сервер запущен на ${HTTP_SERVER_URL}"
         else
             log info "HTTP сервер не запушен"
         fi
@@ -360,13 +360,13 @@ check_http_server(){
         curl -sL --max-time 3 \
             -w "%{http_code}" \
             -o /dev/null \
-            "http://${HTTP_SERVER}"
+            "${HTTP_SERVER_URL}"
     )
 
     if [[ "${RESULT}" = "000" ]]; then
-        fail "При проверке HTTP сервера ${HTTP_SERVER} возникла ошибка. Проверьте работу сервера"
+        fail "При проверке HTTP сервера ${HTTP_SERVER_URL} возникла ошибка. Проверьте работу сервера"
     else
-        log info "HTTP сервер ${HTTP_SERVER} готов принимать запросы"
+        log info "HTTP сервер ${HTTP_SERVER_URL} готов принимать запросы"
     fi
 }
 
@@ -507,7 +507,9 @@ EOF
     set_if_undefined FILES_GEN_AUTORESTART false
 
     HTTP_SERVER="${HTTP_SERVER_IP}:${HTTP_SERVER_PORT}"
+    HTTP_SERVER_URL="http://${HTTP_SERVER}"
     PROXY_SERVER="${PROXY_IP}:${PROXY_PORT}"
+    PROXY_SERVER_URL="socks5://${PROXY_SERVER}"
 
     #
     # check variables
@@ -913,8 +915,8 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
                         target="_blank">FoxyProxy</a></li>
                 <li>Открыть настройки расширения <strong>FoxyProxy</strong></li>
                 <li>Перейти в: <strong>Настройки > Импортировать настройки > Import from URL</strong></li>
-                <li>Вставить ссылку <a href="http://${HTTP_SERVER}/$(basename " ${FOXY_PROXY_CONFIG}")"
-                        target="_blank">http://${HTTP_SERVER}/$(basename "${FOXY_PROXY_CONFIG}")</a></li>
+                <li>Вставить ссылку <a href="${HTTP_SERVER_URL}/$(basename " ${FOXY_PROXY_CONFIG}")"
+                        target="_blank">${HTTP_SERVER_URL}/$(basename "${FOXY_PROXY_CONFIG}")</a></li>
                 <li>Нажмите кнопку <strong>Импортировать настройки</strong>, затем <strong>Сохранить</strong></li>
                 <li>Нажмите на иконку <strong>FoxyProxy</strong> в панели задач браузера и выберите
                     <strong>${BASENAME}</strong>
@@ -979,7 +981,7 @@ $ gsettings set org.gnome.system.proxy autoconfig-url '${PAC_URL}'</code></pre>
 
 </html>
 EOF
-        log info "Инструкция по работе c ${BASENAME} доступна по ссылке http://${HTTP_SERVER}/$(basename "${INFO_FILE}")"
+        log info "Инструкция по работе c ${BASENAME} доступна по ссылке ${HTTP_SERVER_URL}/$(basename "${INFO_FILE}")"
     }
 
     create_foxy_proxy_config(){
@@ -1024,7 +1026,7 @@ EOF
 }
 EOF
         log info "Конфиг для FoxyProxy сгенерирован по пути ${FOXY_PROXY_CONFIG}"
-        log info "URL для FoxyProxy: http://${HTTP_SERVER}/$(basename "${FOXY_PROXY_CONFIG}")"
+        log info "URL для FoxyProxy: ${HTTP_SERVER_URL}/$(basename "${FOXY_PROXY_CONFIG}")"
     }
 
     is_running(){
@@ -1034,7 +1036,7 @@ EOF
     case $1 in
     start | regen-files)
         LAST_HOSTS_HASH=$(md5sum "${HOSTS_FILE}" | awk '{print $1}')
-        PAC_URL="http://${HTTP_SERVER}/proxy.pac"
+        PAC_URL="${HTTP_SERVER_URL}/proxy.pac"
 
         prepare_pac_data
         create_pac_file
