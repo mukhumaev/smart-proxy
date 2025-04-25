@@ -1185,6 +1185,8 @@ print_help(){
 
   check-proxy      Проверка работы и доступности proxy
 
+  update           Обновить утилиту до последней версии
+
   help             Показать справку
 
 EOF
@@ -1195,6 +1197,9 @@ main(){
     LOCAL_BIN="${HOME}/.local/bin"
     EXEC_FILE="${LOCAL_BIN}/${BASENAME}"
     WORKDIR="${WORKDIR:-${HOME}/.${BASENAME}}"
+    GIT_URL="https://github.com/mukhumaev/smart-proxy"
+    __CURRENT_FILE__="${BASH_SOURCE[0]}"
+    __CURRENT_FILE_NAME__=$(basename "${__CURRENT_FILE__}")
 
     is_bash && FULL_PATH=$(readlink -f "$0")
     is_zsh  && FULL_PATH=$(readlink -f "${(%):-%x}")
@@ -1282,6 +1287,27 @@ main(){
         config read
 
         check_ssh_proxy
+    ;;
+    update)
+        TMP_DIR="$(mktemp -d)"
+
+        log info "Копирую ${__CURRENT_FILE_NAME__} в ${TMP_DIR}"
+        git clone "${GIT_URL}" "${TMP_DIR}" > /dev/null 2>&1
+        TMP_FILE="${TMP_DIR}/${__CURRENT_FILE_NAME__}"
+
+
+        if [ -f "${TMP_FILE}" ]; then
+            log info "Обновляю ${__CURRENT_FILE_NAME__}"
+            cp "${TMP_FILE}" "${__CURRENT_FILE__}"
+
+            if cmp "${TMP_FILE}" "${__CURRENT_FILE__}" > /dev/null 2>&1; then
+                log info "${__CURRENT_FILE_NAME__} обновлен до актуальной версии"
+            else
+                log error "Не удалось скопировать ${TMP_FILE} в ${__CURRENT_FILE_NAME__}"
+            fi
+        else
+            log info "Произошла ошибка при копировании ${__CURRENT_FILE_NAME__}"
+        fi
     ;;
     *)
         print_help
