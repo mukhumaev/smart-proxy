@@ -1183,6 +1183,8 @@ print_help(){
                    указанный в системной переменной \$EDITOR. Если данная переменная не установлена,
                    для редактирования будет применён редактор vi
 
+  check-proxy      Проверка работы и доступности proxy
+
   help             Показать справку
 
 EOF
@@ -1275,6 +1277,11 @@ main(){
         if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
             ${FUNCNAME[0]:-${funcstack[1]}} regen-files
         fi
+    ;;
+    check-proxy)
+        config read
+
+        check_ssh_proxy
     ;;
     *)
         print_help
