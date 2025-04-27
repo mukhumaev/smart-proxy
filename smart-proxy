@@ -177,7 +177,7 @@ ssh_proxy(){
     case $1 in
     start)
         if is_enabled "${CUSTOM_PROXY}"; then
-            log warn "Переменная CUSTOM_PROXY имеет значение true. SSH Proxy не запускаем, используем кастомное прокси ${PROXY_SERVER_URL}"
+            log warn "Переменная CUSTOM_PROXY имеет значение true. SSH Proxy не будет запущен, используется кастомное прокси ${PROXY_SERVER_URL}"
             return 0
         fi
 
@@ -216,7 +216,7 @@ ssh_proxy(){
     ;;
     status)
         if is_enabled "${CUSTOM_PROXY}"; then
-            log warn "Используем кастомное прокси ${PROXY_SERVER_URL}"
+            log warn "Используется кастомное прокси ${PROXY_SERVER_URL}"
 
             is_enabled "${CUSTOM_PROXY_LOCAL}" && is_running && \
                 log warn "Прокси на ${PROXY_SERVER_URL} не запущен"
@@ -405,7 +405,7 @@ config(){
     fi
     log info "Создание шаблона конфигурации ${CONFIG}"
     cat <<EOF > "${CONFIG}"
-# Используем кастомное прокси (по умолчанию: false)
+# Используется кастомное прокси (по умолчанию: false)
 # При значении true Proxy поверх SSH не запускается
 CUSTOM_PROXY=false
 
@@ -874,7 +874,7 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
                 <tr>
                     <td><b>CUSTOM_PROXY</b></td>
                     <td>false</td>
-                    <td>Используем кастомное прокси, без запуска SSH Proxy</td>
+                    <td>Используется кастомное прокси, без запуска SSH Proxy</td>
                 </tr>
                 <tr>
                     <td><b>CUSTOM_PROXY_TYPE</b></td>

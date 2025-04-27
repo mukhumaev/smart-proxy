@@ -108,7 +108,7 @@ $ /path/to/smart-proxy regen-files # перегенерировать файлы
 
 |Переменная|Значение по умолчанию|Комментарий|
 |-|-|-|
-|**CUSTOM\_PROXY**|false|Используем кастомное прокси, без запуска SSH Proxy|
+|**CUSTOM\_PROXY**|false|Используется кастомное прокси, без запуска SSH Proxy|
 |**CUSTOM\_PROXY_TYPE**|socks5|Тип кастомного прокси. Не используется при CUSTOM\_PROXY=false|
 |**CUSTOM\_PROXY_LOCAL**|true|Используется для проверки запущен ли кастомный прокси локально. Не используется при CUSTOM\_PROXY=false|
 |**PROXY\_IP**|127.0.0.1|IP адрес для запуска SSH прокси. Если CUSTOM\_PROXY=true, то IP кастомного прокси сервера|
