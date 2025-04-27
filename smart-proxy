@@ -176,6 +176,11 @@ ssh_proxy(){
 
     case $1 in
     start)
+        if is_enabled "${CUSTOM_PROXY}"; then
+            log warn "Переменная CUSTOM_PROXY имеет значение true. SSH Proxy не запускаем, используем кастомное прокси ${PROXY_SERVER_URL}"
+            return 0
+        fi
+
         if is_running; then
             log info "SSH Proxy уже запущен на ${PROXY_SERVER_URL}"
             return 0
@@ -197,7 +202,10 @@ ssh_proxy(){
     ;;
     stop)
         rm -rf "${SSH_LOCKFILE}" > /dev/null 2>&1
-        if is_running; then
+        if is_enabled "${CUSTOM_PROXY}"; then
+            log warn "SSH Proxy не запущен, используется кастомное прокси ${PROXY_SERVER_URL}"
+            return 0
+        elif is_running; then
             log info "Завершение работы SSH Proxy ${PROXY_SERVER_URL}"
             for PID in ${PIDS}; do
                 (ps -p "${PID}" && kill -9 "${PID}") &> /dev/null
@@ -207,25 +215,44 @@ ssh_proxy(){
         fi
     ;;
     status)
-        if is_running; then
+        if is_enabled "${CUSTOM_PROXY}"; then
+            log warn "Используем кастомное прокси ${PROXY_SERVER_URL}"
+
+            is_enabled "${CUSTOM_PROXY_LOCAL}" && is_running && \
+                log warn "Прокси на ${PROXY_SERVER_URL} не запущен"
+
+        elif is_running; then
             log info "SSH Proxy запущен на ${PROXY_SERVER_URL}"
         else
             log info "SSH Proxy не запушен"
         fi
     ;;
     is-running)
+        is_enabled "${CUSTOM_PROXY}" && return 0
         is_running
     ;;
     esac
 }
 
-check_ssh_proxy(){
+proxy_type_for_pac(){
+    if is_disabled "${CUSTOM_PROXY}"; then
+        echo SOCKS
+    elif is_enabled "${CUSTOM_PROXY}" && [[ ${CUSTOM_PROXY_TYPE} =~ ^(socks5)$ ]]; then
+        echo SOCKS
+    else
+        echo PROXY
+    fi
+}
+
+check_proxy(){
     local CURRENT_IP PROXY_IP
 
+    log warn "Используется кастомное прокси: ${PROXY_SERVER_URL}"
+
     PROXY_IP=$(
-        curl -sL --max-time 3 --socks5 \
-            "${PROXY_SERVER_URL}" \
-            "${IP_CHECKER_HOST}"
+        https_proxy="${PROXY_SERVER_URL}" \
+        http_proxy="${PROXY_SERVER_URL}"  \
+        curl -sL --max-time 3 "${IP_CHECKER_HOST}"
     )
 
     CURRENT_IP=$(
@@ -378,10 +405,26 @@ config(){
     fi
     log info "Создание шаблона конфигурации ${CONFIG}"
     cat <<EOF > "${CONFIG}"
+# Используем кастомное прокси (по умолчанию: false)
+# При значении true Proxy поверх SSH не запускается
+CUSTOM_PROXY=false
+
+# Тип кастомного прокси (по умолчанию: socks5)
+# Игнорируется если CUSTOM_PROXY=false
+# достурные варианты: http, https, socks5
+CUSTOM_PROXY_TYPE=socks5
+
+# Кастомный прокси запущеный на текущем хосте (по умолчанию: true)
+# Используется для проверки запущен ли кастомный прокси локально
+# Игнорируется если CUSTOM_PROXY=false
+CUSTOM_PROXY_LOCAL=true
+
 # Локальный IP адрес для SSH прокси (по умолчанию: 127.0.0.1)
+# Если CUSTOM_PROXY=true, то IP кастомного сервера
 PROXY_IP=127.0.0.1
 
 # Локальный PORT для SSH прокси (по умолчанию: 61942)
+# Если CUSTOM_PROXY=true, то порт кастомного сервера
 PROXY_PORT=61942
 
 # Переменная, определяющая будет
@@ -487,7 +530,9 @@ EOF
     #
     # Set variables if undefined
     #
-
+    set_if_undefined CUSTOM_PROXY          false
+    set_if_undefined CUSTOM_PROXY_TYPE     socks5
+    set_if_undefined CUSTOM_PROXY_LOCAL    true
     set_if_undefined PROXY_IP              127.0.0.1
     set_if_undefined PROXY_PORT            61942
     set_if_undefined PROXY_AUTORESTART     true
@@ -514,6 +559,14 @@ EOF
     #
     # check variables
     #
+
+    if is_enabled "${CUSTOM_PROXY}"; then
+        ! [[ "${CUSTOM_PROXY_TYPE}" =~ ^(http|https|socks5)$ ]] &&
+            fail "При включенной опции CUSTOM_PROXY, CUSTOM_PROXY_TYPE может содержать только: http, https, socks5. Текущее значение: ${CUSTOM_PROXY_TYPE}"
+
+        # Using custom proxy type
+        PROXY_SERVER_URL="${CUSTOM_PROXY_TYPE}://${PROXY_SERVER}"
+    fi
 
     [[ "${PROXY_PORT}" = "${HTTP_SERVER_PORT}" ]] &&
         fail "Для HTTP сервера и SSH Proxy указан одинаковый порт ${PROXY_PORT}. Назначьте разные порты"
@@ -623,7 +676,7 @@ function FindProxyForURL(url, host) {
     // Проверка наличия домена из URL в DOMAIN_LIST
     for (var i = 0; i < DOMAIN_LIST.length; i++) {
         if (isMatched(host, DOMAIN_LIST[i])) {
-            return "SOCKS ${PROXY_SERVER}; DIRECT";
+            return "$(proxy_type_for_pac) ${PROXY_SERVER}; DIRECT";
         }
     }
 
@@ -636,12 +689,12 @@ function FindProxyForURL(url, host) {
         if (ipEntry.indexOf('/') !== -1) {
             // Это подсеть
             if (ipInRange(ip, ipEntry)) {
-                return "SOCKS ${PROXY_SERVER}; DIRECT";
+                return "$(proxy_type_for_pac) ${PROXY_SERVER}; DIRECT";
             }
         } else {
             // Это отдельный IP
             if (ip === ipEntry) {
-                return "SOCKS ${PROXY_SERVER}; DIRECT";
+                return "$(proxy_type_for_pac) ${PROXY_SERVER}; DIRECT";
             }
         }
     }
@@ -739,6 +792,7 @@ EOF
 
 <body>
     <nav>
+        <a href="${GIT_URL}">GitHub</a>
         <a href="#main">Общая информация</a>
         <a href="#quick-start">Первичная настройка</a>
         <a href="#config-file">Параметры конфигурации</a>
@@ -830,14 +884,29 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
             </thead>
             <tbody>
                 <tr>
+                    <td><b>CUSTOM_PROXY</b></td>
+                    <td>false</td>
+                    <td>Используем кастомное прокси, без запуска SSH Proxy</td>
+                </tr>
+                <tr>
+                    <td><b>CUSTOM_PROXY_TYPE</b></td>
+                    <td>socks5</td>
+                    <td>Тип кастомного прокси. Не используется при CUSTOM_PROXY=false</td>
+                </tr>
+                <tr>
+                    <td><b>CUSTOM_PROXY_LOCAL</b></td>
+                    <td>true</td>
+                    <td>Используется для проверки запущен ли кастомный прокси локально. Не используется при CUSTOM_PROXY=false</td>
+                </tr>
+                <tr>
                     <td><b>PROXY_IP</b></td>
                     <td>127.0.0.1</td>
-                    <td>IP адрес для запуска SSH прокси</td>
+                    <td>IP адрес для запуска SSH прокси. Если CUSTOM_PROXY=true, то IP кастомного сервера</td>
                 </tr>
                 <tr>
                     <td><b>PROXY_PORT</b></td>
                     <td>61942</td>
-                    <td>Порт для SSH прокси</td>
+                    <td>Порт для SSH прокси. Если CUSTOM_PROXY=true, то порт кастомного сервера</td>
                 </tr>
                 <tr>
                     <td><b>PROXY_AUTORESTART</b></td>
@@ -1213,7 +1282,7 @@ main(){
         files_generator $1
 
         ssh_proxy $1
-        check_ssh_proxy
+        check_proxy
     ;;
     daemon)
         SYSTEMD_LOGS="true"
@@ -1286,7 +1355,7 @@ main(){
     check-proxy)
         config read
 
-        check_ssh_proxy
+        check_proxy
     ;;
     update)
         TMP_DIR="$(mktemp -d)"
