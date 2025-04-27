@@ -1261,6 +1261,36 @@ print_help(){
 EOF
 }
 
+self(){
+    local DEEP
+
+    is_bash && DEEP=1
+    is_zsh  && DEEP=2
+
+    FUNC="${FUNCNAME[${DEEP}]:-${funcstack[${DEEP}]}}"
+
+    if [ -n "$1" ]; then
+        ${FUNC} $@
+    else
+        echo "${FUNC}"
+    fi
+}
+
+file_compare(){
+    local FILE1_SHA1SUM FILE2_SHA1SUM
+
+    if ! [ -f $1 ]; then
+        fail "$2 не файл"
+    elif ! [ -f $2 ]; then
+        fail "$2 не файл"
+    else
+        FILE1_SHA1SUM=$(sha1sum "$1" | awk '{print $1}')
+        FILE2_SHA1SUM=$(sha1sum "$2" | awk '{print $1}')
+
+        [ "${FILE1_SHA1SUM}" = "${FILE2_SHA1SUM}" ]
+    fi
+}
+
 main(){
     BASENAME="smart-proxy"
     LOCAL_BIN="${HOME}/.local/bin"
@@ -1268,6 +1298,7 @@ main(){
     WORKDIR="${WORKDIR:-${HOME}/.${BASENAME}}"
     GIT_URL="https://github.com/mukhumaev/smart-proxy"
     __CURRENT_FILE__="${BASH_SOURCE[0]}"
+    __CURRENT_FILE_DIR__=$(dirname "${__CURRENT_FILE__}")
     __CURRENT_FILE_NAME__=$(basename "${__CURRENT_FILE__}")
 
     is_bash && FULL_PATH=$(readlink -f "$0")
@@ -1289,7 +1320,7 @@ main(){
 
         grep -E -q "(start|stop|restart)" <<<"$2" || fail "Опция $1 поддерживает только команды: start, stop, restart"
 
-        ${FUNCNAME[0]:-${funcstack[1]}} "$2"
+        self "$2"
         # костыль необходимый при запуске через systemd чтобы скрипт постоянно "висел"
         # иначе systemd завершает фоновые процессы скрипта после завершения основной функции
         while [[ "$2" = "start" ]]; do
@@ -1302,9 +1333,9 @@ main(){
         return 0
     ;;
     restart)
-        ${FUNCNAME[0]:-${funcstack[1]}} stop
+        self stop
         sleep 1
-        ${FUNCNAME[0]:-${funcstack[1]}} start
+        self start
     ;;
     status | stop)
         config read
@@ -1336,7 +1367,7 @@ main(){
         NEW_HASH=$(file-hash "${HOSTS_FILE}")
 
         if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
-            ${FUNCNAME[0]:-${funcstack[1]}} regen-files
+            self regen-files
         fi
     ;;
     conf-edit)
@@ -1349,7 +1380,7 @@ main(){
         NEW_HASH=$(file-hash "${CONFIG}")
 
         if [[ "${OLD_HASH}" != "${NEW_HASH}" ]]; then
-            ${FUNCNAME[0]:-${funcstack[1]}} regen-files
+            self regen-files
         fi
     ;;
     check-proxy)
@@ -1358,6 +1389,10 @@ main(){
         check_proxy
     ;;
     update)
+        if [ -d "${__CURRENT_FILE_DIR__}/.git" ]; then
+            git remote get-url origin | grep -q git@ && git pull
+        fi
+
         TMP_DIR="$(mktemp -d)"
 
         log info "Копирую ${__CURRENT_FILE_NAME__} в ${TMP_DIR}"
@@ -1366,16 +1401,26 @@ main(){
 
 
         if [ -f "${TMP_FILE}" ]; then
-            log info "Обновляю ${__CURRENT_FILE_NAME__}"
-            cp "${TMP_FILE}" "${__CURRENT_FILE__}"
 
-            if cmp "${TMP_FILE}" "${__CURRENT_FILE__}" > /dev/null 2>&1; then
+            if file_compare "${TMP_FILE}" "${__CURRENT_FILE__}"; then
+                log info "Нечего обновлять. У вас актуальная версия ${__CURRENT_FILE_NAME__}"
+                return 0
+            fi
+
+            log warn "Обновляю ${__CURRENT_FILE_NAME__}"
+
+            self stop
+            "${TMP_FILE}" init
+
+            if file_compare "${TMP_FILE}" "${__CURRENT_FILE__}"; then
                 log info "${__CURRENT_FILE_NAME__} обновлен до актуальной версии"
+                "${TMP_FILE}" start
+                rm -rf "${TMP_DIR}"
             else
                 log error "Не удалось скопировать ${TMP_FILE} в ${__CURRENT_FILE_NAME__}"
             fi
         else
-            log info "Произошла ошибка при копировании ${__CURRENT_FILE_NAME__}"
+            log error "Произошла ошибка при копировании ${__CURRENT_FILE_NAME__}"
         fi
     ;;
     *)
