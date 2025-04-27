@@ -420,11 +420,11 @@ CUSTOM_PROXY_TYPE=socks5
 CUSTOM_PROXY_LOCAL=true
 
 # Локальный IP адрес для SSH прокси (по умолчанию: 127.0.0.1)
-# Если CUSTOM_PROXY=true, то IP кастомного сервера
+# Если CUSTOM_PROXY=true, то IP кастомного прокси сервера
 PROXY_IP=127.0.0.1
 
 # Локальный PORT для SSH прокси (по умолчанию: 61942)
-# Если CUSTOM_PROXY=true, то порт кастомного сервера
+# Если CUSTOM_PROXY=true, то порт кастомного прокси сервера
 PROXY_PORT=61942
 
 # Переменная, определяющая будет
@@ -901,12 +901,12 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
                 <tr>
                     <td><b>PROXY_IP</b></td>
                     <td>127.0.0.1</td>
-                    <td>IP адрес для запуска SSH прокси. Если CUSTOM_PROXY=true, то IP кастомного сервера</td>
+                    <td>IP адрес для запуска SSH прокси. Если CUSTOM_PROXY=true, то IP кастомного прокси сервера</td>
                 </tr>
                 <tr>
                     <td><b>PROXY_PORT</b></td>
                     <td>61942</td>
-                    <td>Порт для SSH прокси. Если CUSTOM_PROXY=true, то порт кастомного сервера</td>
+                    <td>Порт для SSH прокси. Если CUSTOM_PROXY=true, то порт кастомного прокси сервера</td>
                 </tr>
                 <tr>
                     <td><b>PROXY_AUTORESTART</b></td>
