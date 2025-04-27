@@ -431,15 +431,6 @@ PROXY_PORT=61942
 # ли перезапущен Proxy при падении (по умолчанию: true)
 PROXY_AUTORESTART=true
 
-# Переменная, определяющая будет ли автоматически генерироваться PAC
-# и другие файлы при измении файла домена или IP адресов (по умолчанию: false)
-FILES_GEN_AUTORESTART=false
-
-# Интервал проверки файла домена или IP адресов
-# на наличие изменений в секундах (по умолчанию: 10)
-# учитываеется при FILES_GEN_AUTORESTART=true
-FILES_GEN_INTERVAL=10
-
 # Внешний хост для проверки работы прокси
 # Ресурс должен возвращать IP адрес при обращении через curl
 # Пример таких сервисов: 2ip.ru, eth0.me, icanhazip.com, api64.ipify.org, ipinfo.io/ip
@@ -547,9 +538,6 @@ EOF
     set_if_undefined SSH_PORT              22
     set_if_undefined SSH_USER              root
     set_if_undefined SSH_IDENTITY          "${HOME}/.ssh/id_rsa"
-
-    set_if_undefined FILES_GEN_INTERVAL    10
-    set_if_undefined FILES_GEN_AUTORESTART false
 
     HTTP_SERVER="${HTTP_SERVER_IP}:${HTTP_SERVER_PORT}"
     HTTP_SERVER_URL="http://${HTTP_SERVER}"
@@ -914,17 +902,6 @@ $ /path/to/${BASENAME} regen-files # перегенерировать файлы
                     <td>Рестарт SSH прокси при аварийном завершении</td>
                 </tr>
                 <tr>
-                    <td><b>FILES_GEN_AUTORESTART</b></td>
-                    <td>false</td>
-                    <td>Автоматически перегенерировать файлы для HTTP сервера при изменении файла с доменами или IP адресами
-                    </td>
-                </tr>
-                <tr>
-                    <td><b>FILES_GEN_INTERVAL</b></td>
-                    <td>10</td>
-                    <td>Интервал проверки файла на наличие изменений в секундах. Не используется при FILES_GEN_AUTORESTART=false</td>
-                </tr>
-                <tr>
                     <td><b>IP_CHECKER_HOST</b></td>
                     <td>ifconfig.me</td>
                     <td>Внешний хост для проверки работы прокси. При обращении через curl должен возвращать IP адрес. Пример таких сервисов: 2ip.ru, eth0.me, icanhazip.com, api64.ipify.org, ipinfo.io/ip</td>
@@ -1104,33 +1081,12 @@ EOF
 
     case $1 in
     start | regen-files)
-        LAST_HOSTS_HASH=$(file-hash "${HOSTS_FILE}")
         PAC_URL="${HTTP_SERVER_URL}/proxy.pac"
 
         prepare_pac_data
         create_pac_file
         create_foxy_proxy_config
         create_info_file
-
-        if is_enabled "${FILES_GEN_AUTORESTART}"; then
-            create -f "${FILES_LOCKFILE}"
-            (while is_running && http_server is_running; do
-
-                sleep "${FILES_GEN_INTERVAL}" # интервал проверки в секундах
-
-                # Получаем текущую хэш-сумму
-                if [[ -f "${HOSTS_FILE}" ]]; then
-                    CURRENT_HOSTS_HASH=$(file-hash "${HOSTS_FILE}")
-                fi
-
-                # Сравниваем хэш-суммы
-                if [[ "${LAST_HOSTS_HASH}" != "${CURRENT_HOSTS_HASH}" ]]; then
-                    prepare_pac_data
-                    create_pac_file
-                    LAST_HOSTS_HASH="${CURRENT_HOSTS_HASH}"
-                fi
-            done &) > /dev/null 2>&1
-        fi
     ;;
     stop)
         rm -rf "${FILES_LOCKFILE}" > /dev/null 2>&1
